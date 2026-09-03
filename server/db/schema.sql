@@ -107,16 +107,19 @@ CREATE TABLE IF NOT EXISTS cutting_sessions (
 
 -- Google Sheet Order Master (Read-Only replica)
 CREATE TABLE IF NOT EXISTS orders (
-  wo_no TEXT PRIMARY KEY,                       -- Exact WO string (e.g. 26-27-T02216)
-  ref_code TEXT,                                -- Preserves leading zeros (e.g. 0041)
+  id SERIAL PRIMARY KEY,
+  customer_id TEXT,
+  order_no TEXT,
+  work_order_no TEXT UNIQUE NOT NULL,           -- Exact WO string (e.g. 26-27-T02216)
   customer_name TEXT,
-  material TEXT,
-  ordered_pcs INTEGER NOT NULL DEFAULT 0,
-  source_row INTEGER NOT NULL,
-  row_sha256 TEXT NOT NULL,
-  first_synced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  last_synced_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  sync_status TEXT NOT NULL DEFAULT 'NEW'       -- NEW, CHANGED, UNCHANGED
+  total_required_pcs INTEGER NOT NULL DEFAULT 0,
+  total_cut_pcs INTEGER NOT NULL DEFAULT 0,
+  total_pending_pcs INTEGER NOT NULL DEFAULT 0,
+  overall_progress_pct NUMERIC(5, 2) DEFAULT 0,
+  status TEXT DEFAULT 'PENDING',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  row_sha256 TEXT
 );
 
 CREATE TABLE IF NOT EXISTS order_sync_state (

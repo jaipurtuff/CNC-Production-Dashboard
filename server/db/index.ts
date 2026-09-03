@@ -355,22 +355,22 @@ async function seedSampleProductionData(db: IDbClient) {
 
   // 5. Seed Orders (Google Sheets Master replica)
   const orders = [
-    { wo_no: '26-27-T01995', ref_code: '0041', customer: 'Lingel Windows & Doors', material: '6MM CLEAR FLOAT', pcs: 61, row: 2 },
-    { wo_no: '26-27-T02284', ref_code: '0042', customer: 'Fenesta Building Systems', material: '6MM DESIGN 50', pcs: 41, row: 3 },
-    { wo_no: '26-27-T02480', ref_code: '0043', customer: 'Aluplex Facades Ltd', material: '8MM EXTRA CLEAR', pcs: 36, row: 4 },
-    { wo_no: '26-27-T02511', ref_code: '0044', customer: 'Saint-Gobain Glass', material: '10MM TOUGHENED CLEAR', pcs: 48, row: 5 },
-    { wo_no: '26-27-T02602', ref_code: '0045', customer: 'Glass Wall Systems', material: '12MM LOW-E CLEAR', pcs: 24, row: 6 },
-    { wo_no: '26-27-T02715', ref_code: '0046', customer: 'Schueco Architectural', material: '6MM REFLECTIVE GREY', pcs: 50, row: 7 },
+    { work_order_no: '26-27-T01995', order_no: '0041', customer_name: 'Lingel Windows & Doors', pcs: 61 },
+    { work_order_no: '26-27-T02284', order_no: '0042', customer_name: 'Fenesta Building Systems', pcs: 41 },
+    { work_order_no: '26-27-T02480', order_no: '0043', customer_name: 'Aluplex Facades Ltd', pcs: 36 },
+    { work_order_no: '26-27-T02511', order_no: '0044', customer_name: 'Saint-Gobain Glass', pcs: 48 },
+    { work_order_no: '26-27-T02602', order_no: '0045', customer_name: 'Glass Wall Systems', pcs: 24 },
+    { work_order_no: '26-27-T02715', order_no: '0046', customer_name: 'Schueco Architectural', pcs: 50 },
   ];
 
   for (const o of orders) {
     await db.query(`
       INSERT INTO orders (
-        wo_no, ref_code, customer_name, material, ordered_pcs,
-        source_row, row_sha256, first_synced_at, last_synced_at, sync_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'UNCHANGED')
-      ON CONFLICT (wo_no) DO NOTHING;
-    `, [o.wo_no, o.ref_code, o.customer, o.material, o.pcs, o.row, `seed_${o.wo_no}`]);
+        order_no, work_order_no, customer_name, total_required_pcs,
+        total_cut_pcs, total_pending_pcs, overall_progress_pct, status, row_sha256
+      ) VALUES ($1, $2, $3, $4, 0, $4, 0, 'PENDING', $5)
+      ON CONFLICT (work_order_no) DO NOTHING;
+    `, [o.order_no, o.work_order_no, o.customer_name, o.pcs, `seed_${o.work_order_no}`]);
   }
 
   // 6. Seed Order Sync State

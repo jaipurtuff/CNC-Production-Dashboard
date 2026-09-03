@@ -108,12 +108,13 @@ export class GoogleSheetSyncService {
       let unchangedCount = 0;
 
       for (const row of parsedRows) {
-        // Check existing row by WO No.
+        // Check existing row by Work Order No.
         const existingRes = await this.db.query<{
-          wo_no: string;
+          work_order_no: string;
           row_sha256: string;
+          total_cut_pcs: number;
         }>(
-          'SELECT wo_no, row_sha256 FROM orders WHERE wo_no = $1',
+          'SELECT work_order_no, row_sha256, total_cut_pcs FROM orders WHERE work_order_no = $1',
           [row.woNo]
         );
 
@@ -122,33 +123,36 @@ export class GoogleSheetSyncService {
           newCount++;
           await this.db.query(
             `INSERT INTO orders (
-              wo_no, ref_code, customer_name, material, ordered_pcs,
-              source_row, row_sha256, first_synced_at, last_synced_at, sync_status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'NEW')`,
+              order_no, work_order_no, customer_name, total_required_pcs,
+              total_cut_pcs, total_pending_pcs, overall_progress_pct, status,
+              row_sha256, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, 0, $4, 0, 'PENDING', $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
             [
+              row.refCode || row.woNo,
               row.woNo,
-              row.refCode,
               row.customerName,
-              row.material,
               row.orderedPcs,
-              row.sourceRow,
               row.rowSha256,
             ]
           );
         } else if (existingRes.rows[0].row_sha256 !== row.rowSha256) {
           // CHANGED row
           changedCount++;
+          const cutPcs = Number(existingRes.rows[0].total_cut_pcs || 0);
+          const pendingPcs = Math.max(0, row.orderedPcs - cutPcs);
+          const progressPct = row.orderedPcs > 0 ? Math.min(100, Math.round((cutPcs / row.orderedPcs) * 100)) : 0;
           await this.db.query(
             `UPDATE orders
-             SET ref_code = $1, customer_name = $2, material = $3, ordered_pcs = $4,
-                 source_row = $5, row_sha256 = $6, last_synced_at = CURRENT_TIMESTAMP, sync_status = 'CHANGED'
-             WHERE wo_no = $7`,
+             SET order_no = $1, customer_name = $2, total_required_pcs = $3,
+                 total_pending_pcs = $4, overall_progress_pct = $5,
+                 row_sha256 = $6, updated_at = CURRENT_TIMESTAMP
+             WHERE work_order_no = $7`,
             [
-              row.refCode,
+              row.refCode || row.woNo,
               row.customerName,
-              row.material,
               row.orderedPcs,
-              row.sourceRow,
+              pendingPcs,
+              progressPct,
               row.rowSha256,
               row.woNo,
             ]
@@ -158,8 +162,8 @@ export class GoogleSheetSyncService {
           unchangedCount++;
           await this.db.query(
             `UPDATE orders
-             SET last_synced_at = CURRENT_TIMESTAMP, sync_status = 'UNCHANGED'
-             WHERE wo_no = $1`,
+             SET updated_at = CURRENT_TIMESTAMP
+             WHERE work_order_no = $1`,
             [row.woNo]
           );
         }

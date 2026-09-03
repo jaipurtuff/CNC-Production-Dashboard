@@ -89,15 +89,26 @@ export interface CncJobItem {
 }
 
 export interface WorkOrderItem {
-  wo_no: string;
-  ref_code: string;
+  id?: number;
+  customer_id?: string | null;
+  order_no?: string | null;
+  work_order_no: string;
+  wo_no?: string;
+  ref_code?: string;
   customer_name: string;
-  material: string;
-  ordered_pcs: number;
-  source_row: number;
-  first_synced_at: string;
-  last_synced_at: string;
-  sync_status: string;
+  material?: string;
+  ordered_pcs?: number;
+  total_required_pcs?: number;
+  total_cut_pcs?: number;
+  total_pending_pcs?: number;
+  overall_progress_pct?: number;
+  source_row?: number;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  first_synced_at?: string;
+  last_synced_at?: string;
+  sync_status?: string;
   producedPieces: number;
   pendingPieces: number;
   completionPct: number;

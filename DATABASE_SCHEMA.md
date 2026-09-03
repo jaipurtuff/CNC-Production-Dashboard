@@ -66,15 +66,21 @@ Append-only log of sheet cut events.
   ```
   Guarantees that repeated scans or job re-runs NEVER insert duplicate events.
 
-### 5. `order_master`
-Cached read-only Google Sheet Order Master records.
-- `wo_no` (VARCHAR(128) PRIMARY KEY): Work order number (exact string).
-- `ref_code` (VARCHAR(64)): Ref column with preserved leading zeros.
-- `customer_name` (VARCHAR(256))
-- `material` (VARCHAR(128))
-- `ordered_pcs` (INTEGER)
-- `source_row` (INTEGER)
-- `sync_status` (VARCHAR(32)): `NEW`, `CHANGED`, `UNCHANGED`.
+### 5. `orders` (Production Work Orders Table)
+Live production orders synchronized with Google Sheets Order Master.
+- `id` (SERIAL PRIMARY KEY)
+- `customer_id` (TEXT)
+- `order_no` (TEXT): Ref/order code with preserved formatting
+- `work_order_no` (TEXT UNIQUE NOT NULL): Canonical work order number (exact string, e.g. 26-27-T02216)
+- `customer_name` (TEXT)
+- `total_required_pcs` (INTEGER DEFAULT 0): Ordered pieces
+- `total_cut_pcs` (INTEGER DEFAULT 0): Cut pieces count
+- `total_pending_pcs` (INTEGER DEFAULT 0): Pending pieces count
+- `overall_progress_pct` (NUMERIC(5,2) DEFAULT 0): Progress percentage
+- `status` (TEXT DEFAULT 'PENDING')
+- `created_at` (TIMESTAMPTZ)
+- `updated_at` (TIMESTAMPTZ)
+- `row_sha256` (TEXT): SHA-256 row fingerprint for idempotent change detection
 
 ### 6. `cnc_monitor_state` & `order_sync_state`
 Singletons tracking active job pointer, scan timestamps, and Google Sheet sync progress.

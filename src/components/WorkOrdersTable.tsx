@@ -36,11 +36,15 @@ export const WorkOrdersTable: React.FC<WorkOrdersTableProps> = ({ orders, onSele
 
   const filteredOrders = orders.filter((o) => {
     const q = filter.toLowerCase();
+    const wo = (o.work_order_no || o.wo_no || '').toLowerCase();
+    const cust = (o.customer_name || '').toLowerCase();
+    const ref = (o.ref_code || o.order_no || '').toLowerCase();
+    const mat = (o.material || '').toLowerCase();
     return (
-      o.wo_no.toLowerCase().includes(q) ||
-      o.customer_name.toLowerCase().includes(q) ||
-      o.ref_code.toLowerCase().includes(q) ||
-      o.material.toLowerCase().includes(q)
+      wo.includes(q) ||
+      cust.includes(q) ||
+      ref.includes(q) ||
+      mat.includes(q)
     );
   });
 
@@ -105,62 +109,65 @@ export const WorkOrdersTable: React.FC<WorkOrdersTableProps> = ({ orders, onSele
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 font-mono">
-              {filteredOrders.map((o) => (
-                <tr key={o.wo_no} className="hover:bg-slate-800/30 transition-colors">
-                  <td className="py-3 px-4 text-slate-400 font-bold tracking-wider">
-                    {o.ref_code}
-                  </td>
-                  <td className="py-3 px-4 font-semibold text-sky-400">
-                    {o.wo_no}
-                  </td>
-                  <td className="py-3 px-4 text-slate-200 font-sans">
-                    {o.customer_name}
-                  </td>
-                  <td className="py-3 px-4 text-slate-400">
-                    {o.material}
-                  </td>
-                  <td className="py-3 px-4 text-right text-slate-300 font-bold">
-                    {o.ordered_pcs}
-                  </td>
-                  <td className="py-3 px-4 text-right text-emerald-400 font-bold">
-                    {o.producedPieces}
-                  </td>
-                  <td className="py-3 px-4 text-right text-slate-400">
-                    {o.pendingPieces}
-                  </td>
-                  <td className="py-3 px-4 w-36">
-                    <div className="flex items-center space-x-2">
-                      <div className="flex-1 bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
-                        <div
-                          className={`h-full rounded-full ${
-                            o.completionPct >= 100
-                              ? 'bg-emerald-500'
-                              : o.completionPct > 0
-                              ? 'bg-indigo-500'
-                              : 'bg-slate-700'
-                          }`}
-                          style={{ width: `${Math.min(100, o.completionPct)}%` }}
-                        />
+              {filteredOrders.map((o) => {
+                const woVal = o.work_order_no || o.wo_no || '';
+                return (
+                  <tr key={woVal} className="hover:bg-slate-800/30 transition-colors">
+                    <td className="py-3 px-4 text-slate-400 font-bold tracking-wider">
+                      {o.ref_code || o.order_no || '-'}
+                    </td>
+                    <td className="py-3 px-4 font-semibold text-sky-400">
+                      {woVal}
+                    </td>
+                    <td className="py-3 px-4 text-slate-200 font-sans">
+                      {o.customer_name}
+                    </td>
+                    <td className="py-3 px-4 text-slate-400">
+                      {o.material || '-'}
+                    </td>
+                    <td className="py-3 px-4 text-right text-slate-300 font-bold">
+                      {o.total_required_pcs ?? o.ordered_pcs ?? 0}
+                    </td>
+                    <td className="py-3 px-4 text-right text-emerald-400 font-bold">
+                      {o.producedPieces}
+                    </td>
+                    <td className="py-3 px-4 text-right text-slate-400">
+                      {o.pendingPieces}
+                    </td>
+                    <td className="py-3 px-4 w-36">
+                      <div className="flex items-center space-x-2">
+                        <div className="flex-1 bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+                          <div
+                            className={`h-full rounded-full ${
+                              o.completionPct >= 100
+                                ? 'bg-emerald-500'
+                                : o.completionPct > 0
+                                ? 'bg-indigo-500'
+                                : 'bg-slate-700'
+                            }`}
+                            style={{ width: `${Math.min(100, o.completionPct)}%` }}
+                          />
+                        </div>
+                        <span className="text-[11px] font-bold text-slate-300 w-9 text-right">
+                          {o.completionPct}%
+                        </span>
                       </div>
-                      <span className="text-[11px] font-bold text-slate-300 w-9 text-right">
-                        {o.completionPct}%
-                      </span>
-                    </div>
-                  </td>
-                  <td className="py-3 px-4 text-slate-400 text-[11px]">
-                    {o.linkedJobId || 'Awaiting Job Run'}
-                  </td>
-                  <td className="py-3 px-4 text-center">
-                    <button
-                      onClick={() => onSelectWo(o.wo_no)}
-                      className="px-2.5 py-1 bg-indigo-950/60 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-800/60 rounded text-[11px] flex items-center space-x-1 mx-auto transition-colors"
-                    >
-                      <span>Trace</span>
-                      <ArrowUpRight className="w-3 h-3" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                    </td>
+                    <td className="py-3 px-4 text-slate-400 text-[11px]">
+                      {o.linkedJobId || 'Awaiting Job Run'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      <button
+                        onClick={() => onSelectWo(woVal)}
+                        className="px-2.5 py-1 bg-indigo-950/60 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-800/60 rounded text-[11px] flex items-center space-x-1 mx-auto transition-colors"
+                      >
+                        <span>Trace</span>
+                        <ArrowUpRight className="w-3 h-3" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

@@ -198,20 +198,24 @@ export function createApiRouter(
   router.get('/orders', async (req, res) => {
     try {
       const ordersRes = await db.query<{
-        wo_no: string;
-        ref_code: string;
-        customer_name: string;
-        material: string;
-        ordered_pcs: number;
-        source_row: number;
-        first_synced_at: string;
-        last_synced_at: string;
-        sync_status: string;
-      }>('SELECT * FROM orders ORDER BY source_row ASC');
+        id: number;
+        customer_id: string | null;
+        order_no: string | null;
+        work_order_no: string;
+        customer_name: string | null;
+        total_required_pcs: number;
+        total_cut_pcs: number;
+        total_pending_pcs: number;
+        overall_progress_pct: number;
+        status: string | null;
+        created_at: string;
+        updated_at: string;
+        row_sha256: string | null;
+      }>('SELECT * FROM orders ORDER BY id ASC');
 
       const ordersWithProduction = await Promise.all(
         ordersRes.rows.map(async (o) => {
-          // Check produced pieces matching this WO No.
+          // Check produced pieces matching this Work Order No.
           const prodRes = await db.query<{
             cut_pieces: string;
             job_id: string | null;
@@ -221,18 +225,24 @@ export function createApiRouter(
                MAX(p.job_id) as job_id
              FROM cnc_pieces p
              WHERE p.order_no = $1 AND p.status = 'CUT'`,
-            [o.wo_no]
+            [o.work_order_no]
           );
 
           const cutPieces = parseInt(prodRes.rows[0]?.cut_pieces || '0', 10);
-          const completionPct = o.ordered_pcs > 0
-            ? Math.min(100, Math.round((cutPieces / o.ordered_pcs) * 100))
-            : 0;
+          const requiredPcs = Number(o.total_required_pcs || 0);
+          const completionPct = requiredPcs > 0
+            ? Math.min(100, Math.round((cutPieces / requiredPcs) * 100))
+            : (Number(o.overall_progress_pct) || 0);
 
           return {
             ...o,
+            work_order_no: o.work_order_no,
+            wo_no: o.work_order_no, // alias for frontend backwards compatibility
+            ref_code: o.order_no || '',
+            material: '',
+            ordered_pcs: requiredPcs,
             producedPieces: cutPieces,
-            pendingPieces: Math.max(0, o.ordered_pcs - cutPieces),
+            pendingPieces: Math.max(0, requiredPcs - cutPieces),
             completionPct,
             linkedJobId: prodRes.rows[0]?.job_id || null,
           };
