@@ -1,0 +1,6 @@
+{
+  "name": "CNC Production Monitoring & Live Dashboard",
+  "description": "Industrial CNC production monitoring, real-time file parsing, immutable event history, and Google Sheets order tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
