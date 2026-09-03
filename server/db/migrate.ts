@@ -82,6 +82,7 @@ export async function runMigrations(): Promise<void> {
       `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS material TEXT;`,
       `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS cut_time TIMESTAMPTZ;`,
       `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS event_date DATE;`,
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS row_sha256 TEXT;`,
     ];
 
     for (const statement of columnMigrations) {

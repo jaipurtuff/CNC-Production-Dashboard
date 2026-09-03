@@ -1,0 +1,27 @@
+[Header]
+OTDCutVersion=2.5
+Dimension=mm
+Date=Tue Sep 01 16:27:07 2026
+[Signature]
+Creator=OPTIMA S.r.l.
+OptimizationPrj=18-08-2026-A-06MM CLEAR------.R01
+[Pattern]
+GlassID=F6
+GlassThickness=6.00
+Pieces=6
+Width=3660.00
+Height=2770.00
+[Info]
+Id=1
+OrderNo=26-27-T01995
+PosNo=101
+Customer=Lingel Windows & Doors
+SheetWidth=1280.00
+SheetHeight=640.00
+[Info]
+Id=2
+OrderNo=26-27-T01995
+PosNo=102
+Customer=Lingel Windows & Doors
+SheetWidth=1450.00
+SheetHeight=720.00

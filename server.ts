@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { getDb } from './server/db/index.js';
@@ -15,11 +16,12 @@ async function startServer() {
   const app = express();
   app.use(express.json());
 
-  console.log('[Server] Connecting to PostgreSQL database...');
+  console.log('[Server] Connecting to database...');
   const db = await getDb();
-  console.log('[Server] PostgreSQL database connected successfully.');
+  console.log('[Server] Database initialized successfully.');
 
-  const sharePath = process.env.CNC_SHARE_PATH || '\\\\192.168.11.211\\iso';
+  const defaultShare = fs.existsSync('./test_share') ? './test_share' : '\\\\192.168.11.211\\iso';
+  const sharePath = process.env.CNC_SHARE_PATH || defaultShare;
 
   // Initialize and start background services (runs continuously on the server)
   const cncMonitor = new CncMonitorService(db, sharePath);

@@ -43,7 +43,7 @@ export async function getDailyProduction(
     distinct_jobs: string;
   }>(
     `SELECT
-       COUNT(DISTINCT job_id || '-' || sheet_index) as sheets_count,
+       COUNT(DISTINCT CONCAT(job_id, '-', sheet_index)) as sheets_count,
        COALESCE(SUM(pieces_count), 0) as pieces_count,
        COALESCE(SUM(area_sqm), 0) as total_area,
        COUNT(DISTINCT job_id) as distinct_jobs
