@@ -9,6 +9,7 @@ export interface DailyProductionSummary {
   jobBreakdown: {
     jobId: string;
     customerName: string | null;
+    customerNames?: string[];
     orderNo: string | null;
     materialCode: string;
     sheetsCutToday: number;
@@ -31,11 +32,12 @@ export interface DailyProductionSummary {
 
 export async function getDailyProduction(
   db: IDbClient,
-  dateStr?: string
+  dateStr?: string,
+  eventsLimit: number = 100
 ): Promise<DailyProductionSummary> {
   const targetDate = dateStr || new Date().toISOString().split('T')[0];
 
-  // 1. Mother Sheets Cut, Pieces Cut, Area
+  // 1. Mother Sheets Cut, Pieces Cut, Area (Server-side PostgreSQL aggregation)
   const summaryRes = await db.query<{
     sheets_count: string;
     pieces_count: string;
@@ -58,7 +60,7 @@ export async function getDailyProduction(
   const totalAreaSqm = parseFloat(parseFloat(row?.total_area || '0').toFixed(4));
   const activeJobsCount = parseInt(row?.distinct_jobs || '0', 10);
 
-  // 2. Breakdown by Job
+  // 2. Breakdown by Job (Single query including lifetime completed sheets, no N+1 query)
   const breakdownRes = await db.query<{
     job_id: string;
     customer_name: string | null;
@@ -68,6 +70,7 @@ export async function getDailyProduction(
     pieces_today: string;
     area_today: string;
     total_programmed_sheets: number;
+    lifetime_completed_sheets: string;
   }>(
     `SELECT
        j.job_id,
@@ -77,41 +80,41 @@ export async function getDailyProduction(
        j.total_programmed_sheets,
        COUNT(pe.sheet_index) as sheets_today,
        COALESCE(SUM(pe.pieces_count), 0) as pieces_today,
-       COALESCE(SUM(pe.area_sqm), 0) as area_today
+       COALESCE(SUM(pe.area_sqm), 0) as area_today,
+       COALESCE(life.lifetime_count, 0) as lifetime_completed_sheets
      FROM production_events pe
      JOIN cnc_jobs j ON pe.job_id = j.job_id
+     LEFT JOIN (
+       SELECT job_id, COUNT(DISTINCT sheet_index) as lifetime_count
+       FROM production_events
+       WHERE event_type = 'SHEET_COMPLETED'
+       GROUP BY job_id
+     ) life ON life.job_id = j.job_id
      WHERE pe.production_date = $1 AND pe.event_type = 'SHEET_COMPLETED'
-     GROUP BY j.job_id, j.customer_name, j.order_no, j.material_code, j.total_programmed_sheets
+     GROUP BY j.job_id, j.customer_name, j.order_no, j.material_code, j.total_programmed_sheets, life.lifetime_count
      ORDER BY j.job_id`,
     [targetDate]
   );
 
-  const jobBreakdown = await Promise.all(
-    breakdownRes.rows.map(async (r) => {
-      // Fetch lifetime completed sheets for this job
-      const lifetimeRes = await db.query<{ lifetime_count: string }>(
-        `SELECT COUNT(DISTINCT sheet_index) as lifetime_count
-         FROM production_events
-         WHERE job_id = $1 AND event_type = 'SHEET_COMPLETED'`,
-        [r.job_id]
-      );
-      const lifetimeCompletedSheets = parseInt(lifetimeRes.rows[0]?.lifetime_count || '0', 10);
+  const jobBreakdown = breakdownRes.rows.map((r) => {
+    const rawCustomers = (r.customer_name || '').split(',').map(s => s.trim()).filter(Boolean);
+    const customerNames = Array.from(new Set(rawCustomers));
 
-      return {
-        jobId: r.job_id,
-        customerName: r.customer_name,
-        orderNo: r.order_no,
-        materialCode: r.material_code,
-        sheetsCutToday: parseInt(r.sheets_today, 10),
-        piecesCutToday: parseInt(r.pieces_today, 10),
-        areaSqmToday: parseFloat(parseFloat(r.area_today).toFixed(4)),
-        totalProgrammedSheets: r.total_programmed_sheets,
-        lifetimeCompletedSheets,
-      };
-    })
-  );
+    return {
+      jobId: r.job_id,
+      customerName: r.customer_name,
+      customerNames,
+      orderNo: r.order_no,
+      materialCode: r.material_code,
+      sheetsCutToday: parseInt(r.sheets_today, 10),
+      piecesCutToday: parseInt(r.pieces_today, 10),
+      areaSqmToday: parseFloat(parseFloat(r.area_today).toFixed(4)),
+      totalProgrammedSheets: r.total_programmed_sheets,
+      lifetimeCompletedSheets: parseInt(r.lifetime_completed_sheets || '0', 10),
+    };
+  });
 
-  // 3. Events list for the day
+  // 3. Events list for the day (limited to most recent events for lightweight payload)
   const eventsRes = await db.query<{
     event_id: number;
     job_id: string;
@@ -127,8 +130,9 @@ export async function getDailyProduction(
        event_timestamp, confidence, fbt_last_write
      FROM production_events
      WHERE production_date = $1 AND event_type = 'SHEET_COMPLETED'
-     ORDER BY event_timestamp DESC`,
-    [targetDate]
+     ORDER BY event_timestamp DESC
+     LIMIT $2`,
+    [targetDate, eventsLimit]
   );
 
   const events = eventsRes.rows.map(e => ({

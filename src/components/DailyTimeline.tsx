@@ -88,7 +88,17 @@ export const DailyTimeline: React.FC<DailyTimelineProps> = ({
                       {j.jobId}
                     </td>
                     <td className="py-3 px-4 text-slate-300 font-sans">
-                      {j.customerName || '—'}
+                      {j.customerNames && j.customerNames.length > 1 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {j.customerNames.map((c, i) => (
+                            <span key={i} className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-[11px] text-slate-200">
+                              {c}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span>{j.customerName || '—'}</span>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-sky-400">
                       {j.orderNo || '—'}

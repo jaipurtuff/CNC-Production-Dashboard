@@ -5,5 +5,7 @@ dist/
 !.env.example
 
 credentials/
+data/
+cnc-sync-fix.bundle
 *.log
 .DS_Store

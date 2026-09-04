@@ -4,24 +4,41 @@ import { CncJobItem } from '../types';
 import { safeFetchJson } from '../lib/api';
 
 interface CncFileInspectorProps {
-  jobs: CncJobItem[];
+  jobs?: CncJobItem[];
   selectedJobId?: string;
 }
 
-export const CncFileInspector: React.FC<CncFileInspectorProps> = ({ jobs, selectedJobId }) => {
-  const [activeJobId, setActiveJobId] = useState(selectedJobId || (jobs[0]?.job_id ?? ''));
+export const CncFileInspector: React.FC<CncFileInspectorProps> = ({ jobs: initialJobs, selectedJobId }) => {
+  const [jobsList, setJobsList] = useState<CncJobItem[]>(initialJobs || []);
+  const [activeJobId, setActiveJobId] = useState(selectedJobId || (initialJobs?.[0]?.job_id ?? ''));
   const [jobDetail, setJobDetail] = useState<any>(null);
   const [activeFileTab, setActiveFileTab] = useState<'FBT' | 'OTD' | 'CNI' | 'Z01'>('FBT');
+
+  // Lazy load jobs if not passed or empty
+  useEffect(() => {
+    if (!initialJobs || initialJobs.length === 0) {
+      safeFetchJson<{ jobs: CncJobItem[] }>('/api/jobs?limit=50')
+        .then(({ data }) => {
+          if (data && Array.isArray(data.jobs)) {
+            setJobsList(data.jobs);
+            if (!activeJobId && data.jobs.length > 0) {
+              setActiveJobId(data.jobs[0].job_id);
+            }
+          }
+        })
+        .catch(err => console.warn('Failed to fetch jobs in inspector:', err));
+    }
+  }, [initialJobs, activeJobId]);
 
   useEffect(() => {
     if (selectedJobId) setActiveJobId(selectedJobId);
   }, [selectedJobId]);
 
   useEffect(() => {
-    if (!activeJobId && jobs.length > 0) {
-      setActiveJobId(jobs[0].job_id);
+    if (!activeJobId && jobsList.length > 0) {
+      setActiveJobId(jobsList[0].job_id);
     }
-  }, [jobs, activeJobId]);
+  }, [jobsList, activeJobId]);
 
   useEffect(() => {
     if (!activeJobId) return;
@@ -32,7 +49,7 @@ export const CncFileInspector: React.FC<CncFileInspectorProps> = ({ jobs, select
       .catch(err => console.warn('Warning fetching job detail:', err));
   }, [activeJobId]);
 
-  const currentJob = jobs.find(j => j.job_id === activeJobId) || jobs[0];
+  const currentJob = jobsList.find(j => j.job_id === activeJobId) || jobsList[0];
 
   return (
     <div className="space-y-6">
@@ -51,9 +68,9 @@ export const CncFileInspector: React.FC<CncFileInspectorProps> = ({ jobs, select
             id="inspector-job-select"
             value={activeJobId}
             onChange={(e) => setActiveJobId(e.target.value)}
-            className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
+            className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-indigo-500 max-w-xs"
           >
-            {jobs.map(j => (
+            {jobsList.map(j => (
               <option key={j.job_id} value={j.job_id}>
                 {j.job_id} ({j.total_programmed_sheets} sheets)
               </option>

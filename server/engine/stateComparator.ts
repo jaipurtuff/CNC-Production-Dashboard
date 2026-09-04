@@ -14,18 +14,34 @@ export interface TransitionResult {
 export async function processJobStateTransition(
   db: IDbClient,
   job: CorrelatedCncJob,
-  effectiveTime: Date = new Date(),
+  scanTime: Date = new Date(),
   overrideDateStr?: string // Allows testing specific calendar days (e.g. '2026-09-01')
 ): Promise<TransitionResult> {
-  const effectiveDateStr = overrideDateStr || effectiveTime.toISOString().split('T')[0];
+  // Authoritative production date logic (Issue 5):
+  // If overrideDateStr provided (e.g. test fixture), use it.
+  // Otherwise use the job's authoritative effectiveCuttingDate (FBT [LAST_WRITE] or file mtime).
+  let effectiveEventTime: Date;
+  if (overrideDateStr) {
+    effectiveEventTime = scanTime;
+  } else if (job.effectiveCuttingDate instanceof Date) {
+    effectiveEventTime = job.effectiveCuttingDate;
+  } else if (typeof job.effectiveCuttingDate === 'string' || typeof job.effectiveCuttingDate === 'number') {
+    effectiveEventTime = new Date(job.effectiveCuttingDate);
+  } else {
+    effectiveEventTime = scanTime;
+  }
+  const effectiveDateStr = overrideDateStr || job.effectiveCuttingDateStr || effectiveEventTime.toISOString().split('T')[0];
+
+  const resolvedCustomerName = job.customerName || (job.customerNames && job.customerNames.length > 0 ? job.customerNames.join(', ') : null);
 
   // 1. Check if job exists
   const existingJobRes = await db.query<{
     job_id: string;
     total_programmed_sheets: number;
     status: string;
+    customer_name: string | null;
   }>(
-    'SELECT job_id, total_programmed_sheets, status FROM cnc_jobs WHERE job_id = $1',
+    'SELECT job_id, total_programmed_sheets, status, customer_name FROM cnc_jobs WHERE job_id = $1',
     [job.jobId]
   );
 
@@ -47,13 +63,13 @@ export async function processJobStateTransition(
         job.sheetHeightMm,
         job.sheetThicknessMm,
         job.materialCode,
-        job.customerName || null,
+        resolvedCustomerName || null,
         job.orderNo || null,
         job.plannedWastePct ?? null,
         job.filenameDate || null,
         job.otdDate || null,
         job.fbtLastWrite || null,
-        effectiveTime.toISOString(),
+        scanTime.toISOString(),
         job.isComplete ? 'COMPLETED' : 'ACTIVE',
       ]
     );
@@ -75,7 +91,7 @@ export async function processJobStateTransition(
           sheet.dimY,
           sheet.thickness,
           areaSqm,
-          sheet.quantityProgrammed,
+          sheet.quantityProgrammed ?? 1,
           sheet.rawLine,
         ]
       );
@@ -92,16 +108,17 @@ export async function processJobStateTransition(
         }
         await db.query(
           `INSERT INTO cnc_pieces (
-            job_id, sheet_index, piece_id, order_no, pos_no, customer_name,
+            job_id, sheet_index, piece_id, order_no, wo_no, pos_no, customer_name,
             width_mm, height_mm, area_sqm, rack_no, status
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING')`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'PENDING')`,
           [
             job.jobId,
             pieceSheetIdx,
             piece.id || null,
             piece.orderNo || null,
+            piece.orderNo || null,
             piece.posNo || null,
-            piece.customer || null,
+            piece.customer || job.customerName || null,
             piece.sheetWidth || null,
             piece.sheetHeight || null,
             piece.areaSqm || null,
@@ -114,8 +131,19 @@ export async function processJobStateTransition(
     await db.query(
       `INSERT INTO system_events (event_type, job_id, message, created_at)
        VALUES ('JOB_CREATED', $1, $2, $3)`,
-      [job.jobId, `New CNC Job detected: ${job.jobId} (${job.totalProgrammedSheets} sheets)`, effectiveTime.toISOString()]
+      [job.jobId, `New CNC Job detected: ${job.jobId} (${job.totalProgrammedSheets} sheets)`, scanTime.toISOString()]
     );
+  } else {
+    // If existing job has new customer information or updated last write, update it
+    if (resolvedCustomerName && existingJobRes.rows[0]?.customer_name !== resolvedCustomerName) {
+      await db.query(
+        `UPDATE cnc_jobs
+         SET customer_name = COALESCE($1, customer_name),
+             order_no = COALESCE($2, order_no)
+         WHERE job_id = $3`,
+        [resolvedCustomerName, job.orderNo || null, job.jobId]
+      );
+    }
   }
 
   // 2. Fetch existing completed sheets for this job
@@ -162,18 +190,19 @@ export async function processJobStateTransition(
         `INSERT INTO production_events (
           job_id, sheet_index, event_type, event_timestamp, production_date,
           pieces_count, area_sqm, fbt_raw_line, fbt_last_write, confidence, created_at
-        ) VALUES ($1, $2, 'SHEET_COMPLETED', $3, $4, $5, $6, $7, $8, 'INFERRED', $3)
+        ) VALUES ($1, $2, 'SHEET_COMPLETED', $3, $4, $5, $6, $7, $8, 'INFERRED', $9)
         ON CONFLICT (job_id, sheet_index, event_type) DO NOTHING
         RETURNING event_id`,
         [
           job.jobId,
           sheet.sheetIndex,
-          effectiveTime.toISOString(),
+          effectiveEventTime.toISOString(),
           effectiveDateStr,
           piecesForSheet,
           areaSqm,
           sheet.rawLine,
           job.fbtLastWrite || null,
+          scanTime.toISOString(),
         ]
       );
 
@@ -185,7 +214,7 @@ export async function processJobStateTransition(
           `UPDATE cnc_mother_sheets
            SET status = 'COMPLETED', completed_at = $1
            WHERE job_id = $2 AND sheet_index = $3`,
-          [effectiveTime.toISOString(), job.jobId, sheet.sheetIndex]
+          [effectiveEventTime.toISOString(), job.jobId, sheet.sheetIndex]
         );
 
         // Update pieces status
@@ -193,7 +222,7 @@ export async function processJobStateTransition(
           `UPDATE cnc_pieces
            SET status = 'CUT', completed_at = $1
            WHERE job_id = $2 AND sheet_index = $3`,
-          [effectiveTime.toISOString(), job.jobId, sheet.sheetIndex]
+          [effectiveEventTime.toISOString(), job.jobId, sheet.sheetIndex]
         );
       }
     }
@@ -209,7 +238,7 @@ export async function processJobStateTransition(
         [
           job.jobId,
           `Job ${job.jobId} resumed after ${previousActiveJob}. Newly completed sheets: [${newlyCompletedIndices.join(', ')}]`,
-          effectiveTime.toISOString(),
+          scanTime.toISOString(),
         ]
       );
     }
@@ -220,7 +249,7 @@ export async function processJobStateTransition(
       `UPDATE cnc_monitor_state
        SET active_job_id = $1, current_sheet_index = $2, last_scan_at = $3
        WHERE id = 1`,
-      [job.jobId, latestSheet, effectiveTime.toISOString()]
+      [job.jobId, latestSheet, scanTime.toISOString()]
     );
   }
 
@@ -235,7 +264,7 @@ export async function processJobStateTransition(
          fbt_last_write = COALESCE($3, fbt_last_write)
      WHERE job_id = $4`,
     [
-      effectiveTime.toISOString(),
+      scanTime.toISOString(),
       isNowComplete ? 'COMPLETED' : 'ACTIVE',
       job.fbtLastWrite || null,
       job.jobId,

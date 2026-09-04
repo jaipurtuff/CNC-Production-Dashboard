@@ -33,6 +33,30 @@ export function groupCncFiles(fileList: DiscoveredFile[]): Map<string, Discovere
   return groups;
 }
 
+export function parseFbtTimestamp(lastWriteStr?: string | null): Date | null {
+  if (!lastWriteStr) return null;
+  const trimmed = lastWriteStr.trim();
+  const dmyMatch = trimmed.match(/^(\d{2})[-/](\d{2})[-/](\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (dmyMatch) {
+    const day = parseInt(dmyMatch[1], 10);
+    const month = parseInt(dmyMatch[2], 10) - 1;
+    const year = parseInt(dmyMatch[3], 10);
+    const hour = parseInt(dmyMatch[4] || '0', 10);
+    const min = parseInt(dmyMatch[5] || '0', 10);
+    const sec = parseInt(dmyMatch[6] || '0', 10);
+    const d = new Date(Date.UTC(year, month, day, hour, min, sec));
+    if (!isNaN(d.getTime())) return d;
+  }
+  const parsed = new Date(trimmed);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+export function parseOtdTimestamp(otdDateStr?: string | null): Date | null {
+  if (!otdDateStr) return null;
+  const d = new Date(otdDateStr.trim());
+  return isNaN(d.getTime()) ? null : d;
+}
+
 export function correlateJobFiles(baseName: string, files: DiscoveredFile[]): CorrelatedCncJob {
   let parsedFbt: ParsedFbt | undefined;
   let parsedOtd: ParsedOtd | undefined;
@@ -90,17 +114,49 @@ export function correlateJobFiles(baseName: string, files: DiscoveredFile[]): Co
   const sheetThicknessMm = firstFbtSheet?.thickness || parsedOtd?.glassThickness || parsedCni?.lz || 0;
   const materialCode = firstFbtSheet?.materialCode || parsedOtd?.glassId || parsedCni?.material || 'UNKNOWN';
 
-  // Customer & Order extracted from OTD Info
-  let customerName: string | undefined;
-  let orderNo: string | undefined;
+  // Customer & Order extracted from OTD Info (Retain ALL distinct customers - do not pick only the first)
+  const customerSet = new Set<string>();
+  const orderSet = new Set<string>();
   if (parsedOtd && parsedOtd.pieces.length > 0) {
-    customerName = parsedOtd.pieces[0].customer;
-    orderNo = parsedOtd.pieces[0].orderNo;
+    for (const p of parsedOtd.pieces) {
+      if (p.customer && p.customer.trim()) customerSet.add(p.customer.trim());
+      if (p.orderNo && p.orderNo.trim()) orderSet.add(p.orderNo.trim());
+    }
   }
+  const customerNames = Array.from(customerSet);
+  const orderNos = Array.from(orderSet);
+  const customerName = customerNames.join(', ') || undefined;
+  const orderNo = orderNos.join(', ') || undefined;
 
   const totalProgrammedSheets = parsedFbt?.totalSheets || 0;
   const completedSheetsCount = parsedFbt?.completedSheets || 0;
   const isComplete = totalProgrammedSheets > 0 && completedSheetsCount >= totalProgrammedSheets;
+
+  // Authoritative Historical Production / Cutting Date (Issue 5)
+  // Determine date from actual file metadata (FBT [LAST_WRITE], OTD Date, or FBT file mtime)
+  // NEVER use today's scan/import date as historical production date
+  const fbtParsedDate = parseFbtTimestamp(parsedFbt?.lastWrite);
+  const fbtUpdateTimestamp = fbtParsedDate || jobFiles.fbt?.mtime;
+  const otdParsedDate = parseOtdTimestamp(parsedOtd?.otdDate);
+  const otdTimestamp = otdParsedDate || jobFiles.otd?.mtime;
+
+  let effectiveCuttingDate = fbtParsedDate || fbtUpdateTimestamp || otdParsedDate || otdTimestamp || jobFiles.fbt?.mtime || jobFiles.otd?.mtime || jobFiles.cni?.mtime;
+  if (!effectiveCuttingDate) {
+    const mtimes = files.map(f => f.mtime.getTime());
+    effectiveCuttingDate = mtimes.length > 0 ? new Date(Math.max(...mtimes)) : new Date();
+  }
+  const effectiveCuttingDateStr = effectiveCuttingDate.toISOString().split('T')[0];
+
+  // Current Sheet Index (Issue 4)
+  let currentSheetIndex: number | null = null;
+  if (parsedFbt && parsedFbt.sheets.length > 0) {
+    const nextPending = parsedFbt.sheets.find(s => !s.isCompleted);
+    if (nextPending) {
+      currentSheetIndex = nextPending.sheetIndex;
+    } else if (parsedFbt.completedSheets >= parsedFbt.totalSheets && parsedFbt.totalSheets > 0) {
+      currentSheetIndex = parsedFbt.totalSheets;
+    }
+  }
 
   return {
     jobId: baseName,
@@ -113,11 +169,17 @@ export function correlateJobFiles(baseName: string, files: DiscoveredFile[]): Co
     sheetThicknessMm,
     materialCode,
     customerName,
+    customerNames,
     orderNo,
+    orderNos,
     plannedWastePct: parsedOtd?.plannedWastePct,
     filenameDate,
     otdDate: parsedOtd?.otdDate,
     fbtLastWrite: parsedFbt?.lastWrite || undefined,
+    effectiveCuttingDate,
+    effectiveCuttingDateStr,
+    fbtUpdateTimestamp,
+    currentSheetIndex,
     isComplete,
     sheets: parsedFbt?.sheets || [],
     pieces: parsedOtd?.pieces || [],

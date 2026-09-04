@@ -20,16 +20,15 @@ export default function App() {
   const [cncStatus, setCncStatus] = useState<CncStatus | null>(null);
   const [orderSync, setOrderSync] = useState<OrderSyncStatus | null>(null);
   const [dailySummary, setDailySummary] = useState<DailyProductionSummary | null>(null);
-  const [jobs, setJobs] = useState<CncJobItem[]>([]);
-  const [orders, setOrders] = useState<WorkOrderItem[]>([]);
 
   const [inspectedJobId, setInspectedJobId] = useState<string | null>(null);
   const [traceabilityWo, setTraceabilityWo] = useState<string>('');
 
-  const fetchDashboardData = useCallback(async () => {
+  // Lightweight polling for Live Production view only
+  const fetchLiveDashboardData = useCallback(async () => {
     setIsPolling(true);
     try {
-      // 1. CNC Status
+      // 1. CNC Machine Status & Current Active Job (lightweight query)
       const { data: statusData } = await safeFetchJson<{
         cnc: CncStatus;
         orderSync: OrderSyncStatus;
@@ -39,24 +38,12 @@ export default function App() {
         if (statusData.orderSync) setOrderSync(statusData.orderSync);
       }
 
-      // 2. Daily metrics for selected date
+      // 2. Daily metrics for selected date (server-side PostgreSQL aggregation)
       const { data: dailyData } = await safeFetchJson<DailyProductionSummary>(
         `/api/production/daily?date=${selectedDate}`
       );
       if (dailyData) {
         setDailySummary(dailyData);
-      }
-
-      // 3. Jobs list
-      const { data: jobsData } = await safeFetchJson<{ jobs: CncJobItem[] }>('/api/jobs');
-      if (jobsData && Array.isArray(jobsData.jobs)) {
-        setJobs(jobsData.jobs);
-      }
-
-      // 4. Orders list
-      const { data: ordersData } = await safeFetchJson<{ orders: WorkOrderItem[] }>('/api/orders');
-      if (ordersData && Array.isArray(ordersData.orders)) {
-        setOrders(ordersData.orders);
       }
 
       setLastUpdated(new Date());
@@ -67,12 +54,12 @@ export default function App() {
     }
   }, [selectedDate]);
 
-  // Polling cycle every 3 seconds for continuous live telemetry
+  // Polling cycle: Only poll live telemetry every 4 seconds
   useEffect(() => {
-    fetchDashboardData();
-    const interval = setInterval(fetchDashboardData, 3000);
+    fetchLiveDashboardData();
+    const interval = setInterval(fetchLiveDashboardData, 4000);
     return () => clearInterval(interval);
-  }, [fetchDashboardData]);
+  }, [fetchLiveDashboardData]);
 
   const handleSelectWo = (woNo: string) => {
     setTraceabilityWo(woNo);
@@ -97,7 +84,7 @@ export default function App() {
 
       {/* Main Workspace */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Tab 1: Live Production & Daily Events */}
+        {/* Tab 1: Live Production & Daily Events (Lightweight, aggregated) */}
         {activeTab === 'production' && (
           <div className="space-y-6">
             {/* Active Cutting Table Banner */}
@@ -106,7 +93,7 @@ export default function App() {
               onSelectJob={handleInspectJob}
             />
 
-            {/* Daily High-Contrast Industrial Metrics */}
+            {/* Daily High-Contrast Industrial Metrics (Aggregated by PostgreSQL) */}
             <MetricsCards
               summary={dailySummary}
               selectedDate={selectedDate}
@@ -122,25 +109,23 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab 2: Work Orders (Google Sheet linked with CNC) */}
+        {/* Tab 2: Work Orders (Lazy-loaded with server-side pagination) */}
         {activeTab === 'orders' && (
           <WorkOrdersTable
-            orders={orders}
             onSelectWo={handleSelectWo}
           />
         )}
 
-        {/* Tab 3: Piece Traceability */}
+        {/* Tab 3: Piece Traceability (Lazy-loaded on demand) */}
         {activeTab === 'traceability' && (
           <TraceabilityView
             initialWo={traceabilityWo}
           />
         )}
 
-        {/* Tab 4: CNC File Inspector */}
+        {/* Tab 4: CNC File Inspector (Lazy-loaded with pagination) */}
         {activeTab === 'inspector' && (
           <CncFileInspector
-            jobs={jobs}
             selectedJobId={inspectedJobId || undefined}
           />
         )}

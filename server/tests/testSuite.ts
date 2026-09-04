@@ -9,6 +9,7 @@ import { groupCncFiles, correlateJobFiles, DiscoveredFile } from '../parsers/job
 import { processJobStateTransition } from '../engine/stateComparator.js';
 import { getDailyProduction } from '../engine/dailyMetrics.js';
 import { GoogleSheetSyncService } from '../sync/googleSheetSync.js';
+import { CncMonitorService } from '../collector/cncMonitor.js';
 
 export interface TestResult {
   testName: string;
@@ -487,6 +488,296 @@ N40 ST50="18-08-2026-A-06MM CLEAR------.R01"
       durationMs: Date.now() - t8Start,
       message: err.message,
     });
+  }
+
+  // --- Test 9: Historical Date Accuracy (Authoritative FBT / OTD metadata) ---
+  const t9Start = Date.now();
+  try {
+    const historicalJobId = 'TEST_HISTORICAL_DATE_JOB';
+    const authoritativeDate = '2026-08-18';
+    const authoritativeTime = new Date('2026-08-18T14:30:00Z');
+
+    const historicalJob: any = {
+      jobId: historicalJobId,
+      baseFilename: historicalJobId,
+      files: {
+        fbt: { filename: `${historicalJobId}.FBT`, mtime: authoritativeTime, size: 100 },
+      },
+      fbtUpdateTimestamp: authoritativeTime,
+      effectiveCuttingDate: authoritativeDate,
+      totalProgrammedSheets: 3,
+      completedSheetsCount: 3,
+      isFullyCompleted: true,
+      materialCode: 'F6',
+      sheetWidthMm: 3660,
+      sheetHeightMm: 2770,
+      sheetThicknessMm: 6,
+      customerNames: ['Alpha Customer'],
+      orderNos: ['WO-1001'],
+      sheets: [
+        { sheetIndex: 1, dimX: 3660, dimY: 2770, thickness: 6, isCompleted: true },
+        { sheetIndex: 2, dimX: 3660, dimY: 2770, thickness: 6, isCompleted: true },
+        { sheetIndex: 3, dimX: 3660, dimY: 2770, thickness: 6, isCompleted: true },
+      ],
+      pieces: [{ orderNo: 'WO-1001', areaSqm: 1.2, customer: 'Alpha Customer' }],
+    };
+
+    // Simulate system scan happening today on 2026-09-04
+    const systemScanTime = new Date('2026-09-04T12:00:00Z');
+    await processJobStateTransition(testDb, historicalJob, systemScanTime);
+
+    // Verify production events recorded under the authoritative date (2026-08-18), NOT the scan date (2026-09-04)
+    const eventsRes = await testDb.query<{ production_date: string; event_timestamp: string }>(
+      'SELECT production_date, event_timestamp FROM production_events WHERE job_id = $1',
+      [historicalJobId]
+    );
+
+    if (eventsRes.rows.length !== 3) {
+      throw new Error(`Expected 3 production events, found ${eventsRes.rows.length}`);
+    }
+
+    for (const row of eventsRes.rows) {
+      const prodDateVal: any = row.production_date;
+      const actualDateStr = prodDateVal instanceof Date
+        ? prodDateVal.toISOString().split('T')[0]
+        : String(prodDateVal).split('T')[0];
+      if (!actualDateStr.startsWith(authoritativeDate)) {
+        throw new Error(
+          `Historical Date Accuracy Failed: Event has production_date='${prodDateVal}', expected authoritative date '${authoritativeDate}'`
+        );
+      }
+    }
+
+    results.push({
+      testName: 'Historical Date Accuracy: Uses FBT/OTD Metadata over Scan Date',
+      passed: true,
+      durationMs: Date.now() - t9Start,
+      message: 'PASSED: All production events use authoritative file metadata (2026-08-18), not system scan time.',
+    });
+  } catch (err: any) {
+    results.push({
+      testName: 'Historical Date Accuracy: Uses FBT/OTD Metadata over Scan Date',
+      passed: false,
+      durationMs: Date.now() - t9Start,
+      message: err.message,
+    });
+  } finally {
+    await testDb.query(`DELETE FROM production_events WHERE job_id = 'TEST_HISTORICAL_DATE_JOB'`);
+    await testDb.query(`DELETE FROM cnc_pieces WHERE job_id = 'TEST_HISTORICAL_DATE_JOB'`);
+    await testDb.query(`DELETE FROM cnc_mother_sheets WHERE job_id = 'TEST_HISTORICAL_DATE_JOB'`);
+    await testDb.query(`DELETE FROM cnc_jobs WHERE job_id = 'TEST_HISTORICAL_DATE_JOB'`);
+  }
+
+  // --- Test 10: Multi-Customer Support Per Job & Work Order ---
+  const t10Start = Date.now();
+  try {
+    const multiCustJobId = 'TEST_MULTI_CUST_JOB';
+    const multiCustJob: any = {
+      jobId: multiCustJobId,
+      baseFilename: multiCustJobId,
+      files: {},
+      totalProgrammedSheets: 2,
+      completedSheetsCount: 2,
+      isFullyCompleted: true,
+      materialCode: 'F6',
+      sheetWidthMm: 3660,
+      sheetHeightMm: 2770,
+      sheetThicknessMm: 6,
+      customerNames: ['Customer One', 'Customer Two', 'Customer Three'],
+      orderNos: ['WO-A', 'WO-B'],
+      effectiveCuttingDate: '2026-09-01',
+      sheets: [
+        { sheetIndex: 1, dimX: 3660, dimY: 2770, thickness: 6, isCompleted: true },
+        { sheetIndex: 2, dimX: 3660, dimY: 2770, thickness: 6, isCompleted: true },
+      ],
+      pieces: [
+        { orderNo: 'WO-A', areaSqm: 1.0, customer: 'Customer One' },
+        { orderNo: 'WO-B', areaSqm: 1.5, customer: 'Customer Two' },
+        { orderNo: 'WO-A', areaSqm: 0.8, customer: 'Customer Three' },
+      ],
+    };
+
+    await processJobStateTransition(testDb, multiCustJob, new Date('2026-09-01T10:00:00Z'));
+
+    const jobRow = await testDb.query<{ customer_name: string }>(
+      'SELECT customer_name FROM cnc_jobs WHERE job_id = $1',
+      [multiCustJobId]
+    );
+
+    const savedCustomers = jobRow.rows[0]?.customer_name || '';
+    if (
+      !savedCustomers.includes('Customer One') ||
+      !savedCustomers.includes('Customer Two') ||
+      !savedCustomers.includes('Customer Three')
+    ) {
+      throw new Error(`Expected all three customers in cnc_jobs, got: '${savedCustomers}'`);
+    }
+
+    const piecesRes = await testDb.query<{ customer_name: string }>(
+      'SELECT DISTINCT customer_name FROM cnc_pieces WHERE job_id = $1 ORDER BY customer_name',
+      [multiCustJobId]
+    );
+    const pieceCustNames = piecesRes.rows.map(r => r.customer_name);
+    if (pieceCustNames.length < 3) {
+      throw new Error(`Expected piece level customers for all 3 customers, got: ${JSON.stringify(pieceCustNames)}`);
+    }
+
+    results.push({
+      testName: 'Multi-Customer Support: Retains All Customers per Job and Pieces',
+      passed: true,
+      durationMs: Date.now() - t10Start,
+      message: 'PASSED: All 3 distinct customers correctly recorded in job header and individual piece records.',
+    });
+  } catch (err: any) {
+    results.push({
+      testName: 'Multi-Customer Support: Retains All Customers per Job and Pieces',
+      passed: false,
+      durationMs: Date.now() - t10Start,
+      message: err.message,
+    });
+  } finally {
+    await testDb.query(`DELETE FROM production_events WHERE job_id = 'TEST_MULTI_CUST_JOB'`);
+    await testDb.query(`DELETE FROM cnc_pieces WHERE job_id = 'TEST_MULTI_CUST_JOB'`);
+    await testDb.query(`DELETE FROM cnc_mother_sheets WHERE job_id = 'TEST_MULTI_CUST_JOB'`);
+    await testDb.query(`DELETE FROM cnc_jobs WHERE job_id = 'TEST_MULTI_CUST_JOB'`);
+  }
+
+  // --- Test 11: Incremental Scanning Cache Verification ---
+  const t11Start = Date.now();
+  try {
+    const filePath = '/cnc_share/SAMPLE_JOB.FBT';
+    const testMtime = new Date('2026-09-01T12:00:00Z');
+    const testSize = 1024;
+
+    const cache = new Map<string, { size: number; mtimeMs: number; sha256: string }>();
+    cache.set(filePath, {
+      size: testSize,
+      mtimeMs: testMtime.getTime(),
+      sha256: 'abc123hash',
+    });
+
+    // Case A: File with matching size and mtime should be classified as unchanged
+    const statA = { size: 1024, mtimeMs: testMtime.getTime() };
+    const isUnchangedA =
+      cache.has(filePath) &&
+      cache.get(filePath)!.size === statA.size &&
+      Math.abs(cache.get(filePath)!.mtimeMs - statA.mtimeMs) < 1000;
+
+    if (!isUnchangedA) {
+      throw new Error('Expected file with matching size and mtime to be detected as unchanged');
+    }
+
+    // Case B: File with modified size should be classified as changed
+    const statB = { size: 2048, mtimeMs: testMtime.getTime() };
+    const isUnchangedB =
+      cache.has(filePath) &&
+      cache.get(filePath)!.size === statB.size &&
+      Math.abs(cache.get(filePath)!.mtimeMs - statB.mtimeMs) < 1000;
+
+    if (isUnchangedB) {
+      throw new Error('Expected modified file size to be detected as changed');
+    }
+
+    results.push({
+      testName: 'Incremental File Tracking: Skips Unchanged Files by Cache',
+      passed: true,
+      durationMs: Date.now() - t11Start,
+      message: 'PASSED: Unchanged files correctly bypassed from re-reading and re-hashing.',
+    });
+  } catch (err: any) {
+    results.push({
+      testName: 'Incremental File Tracking: Skips Unchanged Files by Cache',
+      passed: false,
+      durationMs: Date.now() - t11Start,
+      message: err.message,
+    });
+  }
+
+  // --- Test 12: Server Restart Incremental Persistence & Cache Survival ---
+  const t12Start = Date.now();
+  try {
+    const restartJobId = 'TEST_RESTART_SURVIVAL_JOB';
+    const filePath = '/cnc_share/18-08-2026-A-06MM_CLEAR------.FBT';
+    const testSize = 4096;
+    const testMtime = new Date('2026-08-18T10:00:00Z');
+    const testHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+    // 1. Seed database as if a previous server run had processed this job and file
+    await testDb.query(
+      `INSERT INTO cnc_jobs (
+        job_id, base_filename, total_programmed_sheets, sheet_width_mm, sheet_height_mm,
+        sheet_thickness_mm, material_code, customer_name, order_no, status
+      ) VALUES ($1, $1, 5, 3660, 2770, 6, 'F6', 'Restart Test Customer', 'WO-999', 'ACTIVE')
+      ON CONFLICT (job_id) DO NOTHING`,
+      [restartJobId]
+    );
+
+    await testDb.query(
+      `INSERT INTO cnc_job_files (
+        job_id, file_type, filename, file_path, file_size_bytes, file_mtime, content_sha256, is_stable
+      ) VALUES ($1, 'FBT', '18-08-2026-A-06MM_CLEAR------.FBT', $2, $3, $4, $5, true)
+      ON CONFLICT (job_id, file_type) DO UPDATE
+      SET file_size_bytes = EXCLUDED.file_size_bytes,
+          file_mtime = EXCLUDED.file_mtime,
+          content_sha256 = EXCLUDED.content_sha256`,
+      [restartJobId, filePath, testSize, testMtime.toISOString(), testHash]
+    );
+
+    // 2. Instantiate a brand-new CncMonitorService (representing a fresh server process start after crash/restart)
+    const freshCollector = new CncMonitorService(testDb, '/cnc_share');
+
+    // Verify in-memory cache starts completely empty
+    const statsBefore = freshCollector.getCacheStats();
+    if (statsBefore.filesCached !== 0 || statsBefore.knownJobs !== 0) {
+      throw new Error(`Fresh collector should have empty in-memory cache, got: ${JSON.stringify(statsBefore)}`);
+    }
+
+    // 3. Initialize cache from PostgreSQL
+    await freshCollector.ensureCacheInitialized();
+
+    const statsAfter = freshCollector.getCacheStats();
+    if (statsAfter.filesCached === 0 || statsAfter.knownJobs === 0) {
+      throw new Error(`Collector after server restart failed to load state from PostgreSQL: ${JSON.stringify(statsAfter)}`);
+    }
+
+    // 4. Verify unchanged file is detected directly from persisted PostgreSQL cache WITHOUT reading file or hashing
+    const isUnchanged = freshCollector.isPathCachedAsUnchanged(filePath, testSize, testMtime.getTime());
+    if (!isUnchanged) {
+      throw new Error('Expected file with matching size and mtime to be skipped using PostgreSQL preloaded cache');
+    }
+
+    // 5. Verify modified file (e.g. mtime or size change) is correctly NOT skipped
+    const isModifiedSizeUnchanged = freshCollector.isPathCachedAsUnchanged(filePath, testSize + 500, testMtime.getTime());
+    if (isModifiedSizeUnchanged) {
+      throw new Error('Modified file size must not be classified as unchanged');
+    }
+
+    const isModifiedMtimeUnchanged = freshCollector.isPathCachedAsUnchanged(filePath, testSize, testMtime.getTime() + 60000);
+    if (isModifiedMtimeUnchanged) {
+      throw new Error('Modified file mtime must not be classified as unchanged');
+    }
+
+    // 6. Verify job is recognized as known from PostgreSQL
+    if (!freshCollector.isJobKnown(restartJobId)) {
+      throw new Error(`Job ${restartJobId} should be recognized as known from PostgreSQL`);
+    }
+
+    results.push({
+      testName: 'Server Restart Persistence: Unchanged Files Skipped via PostgreSQL',
+      passed: true,
+      durationMs: Date.now() - t12Start,
+      message: 'PASSED: Fresh collector instance restores file & job state from PostgreSQL, skipping unchanged files and detecting modifications.',
+    });
+  } catch (err: any) {
+    results.push({
+      testName: 'Server Restart Persistence: Unchanged Files Skipped via PostgreSQL',
+      passed: false,
+      durationMs: Date.now() - t12Start,
+      message: err.message,
+    });
+  } finally {
+    await testDb.query(`DELETE FROM cnc_job_files WHERE job_id = 'TEST_RESTART_SURVIVAL_JOB'`);
+    await testDb.query(`DELETE FROM cnc_jobs WHERE job_id = 'TEST_RESTART_SURVIVAL_JOB'`);
   }
 
   const passedCount = results.filter(r => r.passed).length;

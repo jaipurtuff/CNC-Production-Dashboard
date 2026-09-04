@@ -96,11 +96,17 @@ export interface CorrelatedCncJob {
   sheetThicknessMm: number;
   materialCode: string;
   customerName?: string;
+  customerNames?: string[];
   orderNo?: string;
+  orderNos?: string[];
   plannedWastePct?: number;
   filenameDate?: string;
   otdDate?: string;
   fbtLastWrite?: string;
+  effectiveCuttingDate?: Date;
+  effectiveCuttingDateStr?: string;
+  fbtUpdateTimestamp?: Date;
+  currentSheetIndex?: number | null;
   isComplete: boolean;
   sheets: FbtSheetRecord[];
   pieces: OtdPieceInfo[];

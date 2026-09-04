@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS cnc_pieces (
   sheet_index INTEGER NOT NULL,
   piece_id TEXT,
   order_no TEXT,
+  wo_no TEXT,
   pos_no TEXT,
   customer_name TEXT,
   width_mm NUMERIC(10, 2),

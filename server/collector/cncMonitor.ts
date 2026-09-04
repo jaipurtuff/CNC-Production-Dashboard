@@ -13,6 +13,10 @@ interface FileTrackingCache {
   firstSeenMs: number;
 }
 
+interface DiscoveredFileWithStatus extends DiscoveredFile {
+  isChanged: boolean;
+}
+
 export function normalizeSharePath(rawPath: string): string {
   if (!rawPath) return '';
   let clean = rawPath.trim();
@@ -68,6 +72,9 @@ export class CncMonitorService {
   private isCurrentlyOnline: boolean = false;
   private fileCache = new Map<string, FileTrackingCache>();
   private knownExtensions = new Set(['.FBT', '.OTD', '.CNI', '.Z01']);
+  private isCacheInitialized: boolean = false;
+  private cachedCorrelatedJobs = new Map<string, CorrelatedCncJob>();
+  private knownJobsInDb = new Set<string>();
 
   constructor(
     db: IDbClient,
@@ -85,6 +92,70 @@ export class CncMonitorService {
 
   private normalizeSharePath(rawPath: string): string {
     return normalizeSharePath(rawPath);
+  }
+
+  private async initCache(): Promise<void> {
+    if (this.isCacheInitialized) return;
+    try {
+      // Preload persistent file metadata from PostgreSQL cnc_job_files
+      const filesRes = await this.db.query<{
+        file_path: string;
+        file_size_bytes: string | number;
+        file_mtime: string | Date;
+        content_sha256: string;
+      }>('SELECT file_path, file_size_bytes, file_mtime, content_sha256 FROM cnc_job_files');
+
+      for (const row of filesRes.rows) {
+        if (row.file_path) {
+          const mtimeMs = row.file_mtime
+            ? (row.file_mtime instanceof Date ? row.file_mtime.getTime() : new Date(row.file_mtime).getTime())
+            : 0;
+          const normalized = path.normalize(row.file_path);
+          const cacheEntry: FileTrackingCache = {
+            size: Number(row.file_size_bytes),
+            mtimeMs: isNaN(mtimeMs) ? 0 : mtimeMs,
+            sha256: row.content_sha256 || '',
+            isStable: true,
+            firstSeenMs: Date.now(),
+          };
+          this.fileCache.set(normalized, cacheEntry);
+          this.fileCache.set(row.file_path, cacheEntry);
+        }
+      }
+
+      const jobsRes = await this.db.query<{ job_id: string }>('SELECT job_id FROM cnc_jobs');
+      for (const j of jobsRes.rows) {
+        this.knownJobsInDb.add(j.job_id);
+      }
+
+      this.isCacheInitialized = true;
+      console.log(`[CNC Monitor] Initialized persistent cache from PostgreSQL: ${this.fileCache.size} files, ${this.knownJobsInDb.size} known jobs`);
+    } catch (err) {
+      console.warn('[CNC Monitor] Notice: Preloading from cnc_job_files deferred to first scan:', err);
+      this.isCacheInitialized = true;
+    }
+  }
+
+  public async ensureCacheInitialized(): Promise<void> {
+    await this.initCache();
+  }
+
+  public isPathCachedAsUnchanged(fullPath: string, size: number, mtimeMs: number): boolean {
+    const normalized = path.normalize(fullPath);
+    const cached = this.fileCache.get(normalized) || this.fileCache.get(fullPath);
+    if (!cached) return false;
+    return cached.size === size && Math.abs(cached.mtimeMs - mtimeMs) < 1000;
+  }
+
+  public isJobKnown(jobId: string): boolean {
+    return this.knownJobsInDb.has(jobId);
+  }
+
+  public getCacheStats(): { filesCached: number; knownJobs: number } {
+    return {
+      filesCached: this.fileCache.size,
+      knownJobs: this.knownJobsInDb.size,
+    };
   }
 
   public start() {
@@ -119,6 +190,8 @@ export class CncMonitorService {
   public setSharePath(newPath: string) {
     this.sharePath = this.normalizeSharePath(newPath);
     this.fileCache.clear();
+    this.cachedCorrelatedJobs.clear();
+    this.isCacheInitialized = false;
   }
 
   private async performScan(): Promise<void> {
@@ -126,6 +199,7 @@ export class CncMonitorService {
     this.isScanning = true;
 
     try {
+      await this.initCache();
       const now = Date.now();
       let isReachable = false;
       let dirEntries: string[] = [];
@@ -197,12 +271,10 @@ export class CncMonitorService {
         return;
       }
 
-      // Log reachability and enumeration counts
-      console.log(`[CNC Monitor] Scanning ${this.sharePath} (${dirEntries.length} directory entries found)`);
-
       // Discovered files matching .FBT, .OTD, .CNI, .z01
-      const discovered: DiscoveredFile[] = [];
+      const discovered: DiscoveredFileWithStatus[] = [];
       let entryIndex = 0;
+      let changedFilesCount = 0;
 
       for (const entry of dirEntries) {
         const ext = path.extname(entry);
@@ -210,8 +282,8 @@ export class CncMonitorService {
         if (!this.knownExtensions.has(extUpper)) continue;
 
         entryIndex++;
-        // Cooperatively yield event loop every 20 files to keep HTTP server responsive during network I/O
-        if (entryIndex % 20 === 0) {
+        // Cooperatively yield event loop every 25 files to keep HTTP server responsive during network I/O
+        if (entryIndex % 25 === 0) {
           await new Promise(resolve => setImmediate(resolve));
         }
 
@@ -221,31 +293,37 @@ export class CncMonitorService {
           const stat = fs.statSync(fullPath);
           const baseName = path.basename(entry, ext);
 
-          // Stability check: file must not have been modified within the last 300ms
-          const fileAgeMs = now - stat.mtimeMs;
-          const isStable = fileAgeMs >= 300;
+          const normalizedFullPath = path.normalize(fullPath);
+          const cached = this.fileCache.get(normalizedFullPath) || this.fileCache.get(fullPath);
+          // Check if file is unchanged based on size and mtime
+          const isUnchanged =
+            cached !== undefined &&
+            cached.size === stat.size &&
+            Math.abs(cached.mtimeMs - stat.mtimeMs) < 1000;
 
-          const cached = this.fileCache.get(fullPath);
           let sha256 = cached?.sha256 || '';
+          let isChanged = false;
 
-          // Only re-compute hash if file size or mtime changed (Incremental scanning efficiency)
-          if (!cached || cached.size !== stat.size || cached.mtimeMs !== stat.mtimeMs) {
+          if (!isUnchanged) {
+            isChanged = true;
+            changedFilesCount++;
             try {
-              // Strictly read-only file read
+              // Strictly read-only file read only for new or modified files
               const content = fs.readFileSync(fullPath);
               sha256 = computeSha256(content);
             } catch (readErr) {
-              // File might be briefly locked for reading by CNC controller
               sha256 = cached?.sha256 || '';
             }
 
-            this.fileCache.set(fullPath, {
+            const cacheEntry: FileTrackingCache = {
               size: stat.size,
               mtimeMs: stat.mtimeMs,
               sha256,
-              isStable,
+              isStable: true,
               firstSeenMs: cached?.firstSeenMs || now,
-            });
+            };
+            this.fileCache.set(normalizedFullPath, cacheEntry);
+            this.fileCache.set(fullPath, cacheEntry);
           }
 
           discovered.push({
@@ -256,65 +334,153 @@ export class CncMonitorService {
             size: stat.size,
             mtime: stat.mtime,
             sha256,
+            isChanged,
           });
         } catch (fileErr) {
           // Skip inaccessible file in read-only scan
         }
       }
 
-      // Group and correlate jobs
+      // Group files by base name
       const groups = groupCncFiles(discovered);
-      const correlatedJobs: CorrelatedCncJob[] = [];
+
+      // Process only jobs that have changed files or are not yet known in PostgreSQL
+      let jobsUpdatedCount = 0;
+
       for (const [baseName, files] of groups.entries()) {
-        correlatedJobs.push(correlateJobFiles(baseName, files));
+        const hasChangedFile = (files as DiscoveredFileWithStatus[]).some(f => f.isChanged);
+        const isKnownJob = this.knownJobsInDb.has(baseName);
+
+        if (!hasChangedFile && isKnownJob) {
+          // TRULY INCREMENTAL ACROSS SERVER RESTARTS:
+          // If the job already exists in PostgreSQL AND none of its files have changed,
+          // skip all disk reading, file parsing, and state updates!
+          continue;
+        }
+
+        // Correlate files for this job
+        const correlatedJob = correlateJobFiles(baseName, files);
+        this.cachedCorrelatedJobs.set(baseName, correlatedJob);
+        this.knownJobsInDb.add(baseName);
+        jobsUpdatedCount++;
+
+        // Process state transition in database
+        await processJobStateTransition(this.db, correlatedJob, new Date(now));
+
+        // Record or update changed files in cnc_job_files
+        for (const file of files as DiscoveredFileWithStatus[]) {
+          if (file.isChanged || !isKnownJob) {
+            const fileType = file.ext.replace('.', '').toUpperCase();
+            await this.db.query(
+              `INSERT INTO cnc_job_files (
+                 job_id, file_type, filename, file_path, file_size_bytes, file_mtime, content_sha256, last_read_at, is_stable
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+               ON CONFLICT (job_id, file_type) DO UPDATE
+               SET filename = EXCLUDED.filename,
+                   file_path = EXCLUDED.file_path,
+                   file_size_bytes = EXCLUDED.file_size_bytes,
+                   file_mtime = EXCLUDED.file_mtime,
+                   content_sha256 = EXCLUDED.content_sha256,
+                   last_read_at = EXCLUDED.last_read_at,
+                   is_stable = EXCLUDED.is_stable`,
+              [
+                baseName,
+                fileType,
+                file.filename,
+                file.filePath,
+                file.size,
+                file.mtime.toISOString(),
+                file.sha256,
+                new Date(now).toISOString(),
+              ]
+            ).catch((fileDbErr) => {
+              console.warn(`[CNC Monitor] Could not record file ${file.filename} in cnc_job_files:`, fileDbErr?.message || fileDbErr);
+            });
+          }
+        }
       }
 
-      // Process incremental state transition for each detected job
+      // Active Job and Current Sheet identification (Issue 4):
+      // Use the most recently updated .FBT file / sheet activity to determine currently active job.
+      // Do NOT rely on filename dates.
       let activeJobId: string | null = null;
       let currentSheetIdx: number | null = null;
 
-      for (const job of correlatedJobs) {
-        await processJobStateTransition(this.db, job, new Date(now));
+      const jobsWithFbt = Array.from(this.cachedCorrelatedJobs.values())
+        .filter(j => j.files.fbt && (j.fbtUpdateTimestamp || j.files.fbt.mtime))
+        .sort((a, b) => {
+          const timeA = (a.fbtUpdateTimestamp || a.files.fbt!.mtime).getTime();
+          const timeB = (b.fbtUpdateTimestamp || b.files.fbt!.mtime).getTime();
+          return timeB - timeA;
+        });
 
-        // Record discovered files into cnc_job_files table
-        const jobFiles = discovered.filter(f => f.baseName === job.jobId);
-        for (const file of jobFiles) {
-          const fileType = file.ext.replace('.', '').toUpperCase();
-          await this.db.query(
-            `INSERT INTO cnc_job_files (
-               job_id, file_type, filename, file_path, file_size_bytes, file_mtime, content_sha256, last_read_at, is_stable
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
-             ON CONFLICT (job_id, file_type) DO UPDATE
-             SET filename = EXCLUDED.filename,
-                 file_path = EXCLUDED.file_path,
-                 file_size_bytes = EXCLUDED.file_size_bytes,
-                 file_mtime = EXCLUDED.file_mtime,
-                 content_sha256 = EXCLUDED.content_sha256,
-                 last_read_at = EXCLUDED.last_read_at,
-                 is_stable = EXCLUDED.is_stable`,
-            [
-              job.jobId,
-              fileType,
-              file.filename,
-              file.filePath,
-              file.size,
-              file.mtime.toISOString(),
-              file.sha256,
-              new Date(now).toISOString(),
-            ]
-          ).catch((fileDbErr) => {
-            console.warn(`[CNC Monitor] Could not record file ${file.filename} in cnc_job_files:`, fileDbErr?.message || fileDbErr);
-          });
+      if (jobsWithFbt.length > 0) {
+        const newestJob = jobsWithFbt[0];
+        const newestFbtTime = (newestJob.fbtUpdateTimestamp || newestJob.files.fbt!.mtime).getTime();
+        const timeSinceLastFbtMs = now - newestFbtTime;
+
+        if (newestJob.completedSheetsCount < newestJob.totalProgrammedSheets) {
+          // Machine is currently running or paused on this job
+          activeJobId = newestJob.jobId;
+          currentSheetIdx = newestJob.currentSheetIndex ?? (newestJob.completedSheetsCount + 1);
+        } else if (timeSinceLastFbtMs < 30 * 60 * 1000) {
+          // Recently finished within the last 30 minutes
+          activeJobId = newestJob.jobId;
+          currentSheetIdx = newestJob.totalProgrammedSheets;
+        } else {
+          // Machine is idle (no unfinished active job and no recent cutting activity)
+          activeJobId = null;
+          currentSheetIdx = null;
         }
+      } else {
+        // Fallback to persisted state in PostgreSQL (e.g. after server restart when unchanged jobs are skipped)
+        try {
+          const latestDbJobRes = await this.db.query<{
+            job_id: string;
+            total_programmed_sheets: number;
+            status: string;
+            file_mtime: string | Date;
+            completed_count: string | number;
+          }>(
+            `SELECT j.job_id, j.total_programmed_sheets, j.status, f.file_mtime,
+                    COALESCE(
+                      (SELECT COUNT(DISTINCT sheet_index)
+                       FROM production_events pe
+                       WHERE pe.job_id = j.job_id AND pe.event_type = 'SHEET_COMPLETED'),
+                      0
+                    ) as completed_count
+             FROM cnc_jobs j
+             JOIN cnc_job_files f ON f.job_id = j.job_id AND f.file_type = 'FBT'
+             ORDER BY f.file_mtime DESC
+             LIMIT 1`
+          );
 
-        // Determine current active job (most recently modified job that has remaining sheets)
-        if (job.completedSheetsCount < job.totalProgrammedSheets) {
-          activeJobId = job.jobId;
-          currentSheetIdx = job.completedSheetsCount + 1;
+          if (latestDbJobRes.rows.length > 0) {
+            const row = latestDbJobRes.rows[0];
+            const completedSheets = Number(row.completed_count);
+            const totalSheets = Number(row.total_programmed_sheets);
+            const fbtTime = row.file_mtime instanceof Date
+              ? row.file_mtime.getTime()
+              : new Date(row.file_mtime).getTime();
+            const timeSinceLastFbtMs = now - fbtTime;
+
+            if (totalSheets > 0 && completedSheets < totalSheets) {
+              activeJobId = row.job_id;
+              currentSheetIdx = completedSheets + 1;
+            } else if (timeSinceLastFbtMs < 30 * 60 * 1000) {
+              activeJobId = row.job_id;
+              currentSheetIdx = totalSheets;
+            } else {
+              activeJobId = null;
+              currentSheetIdx = null;
+            }
+          }
+        } catch (dbErr) {
+          // If query fails (e.g. table empty), leave activeJobId as null
         }
       }
 
-      // Update state singleton with active job details
+      // Update state singleton with active job details and total jobs tracked
       await this.db.query(
         `UPDATE cnc_monitor_state
          SET active_job_id = $1,
@@ -322,12 +488,14 @@ export class CncMonitorService {
              total_jobs_tracked = $3,
              error_message = NULL
          WHERE id = 1`,
-        [activeJobId, currentSheetIdx, correlatedJobs.length]
+        [activeJobId, currentSheetIdx, this.knownJobsInDb.size]
       );
 
       const elapsedMs = Date.now() - now;
-      if (discovered.length > 0 || correlatedJobs.length > 0) {
-        console.log(`[CNC Monitor] Scan cycle completed in ${elapsedMs}ms: ${discovered.length} CNC files matched, ${correlatedJobs.length} jobs tracked`);
+      if (changedFilesCount > 0 || jobsUpdatedCount > 0) {
+        console.log(
+          `[CNC Monitor] Scan completed in ${elapsedMs}ms: ${discovered.length} total files, ${changedFilesCount} changed files, ${jobsUpdatedCount} jobs updated`
+        );
       }
     } catch (err: any) {
       console.error('[CNC Monitor] Scan cycle failed:', err);

@@ -113,10 +113,11 @@ export class GoogleSheetSyncService {
         // Check existing row by Work Order No.
         const existingRes = await this.db.query<{
           work_order_no: string;
+          customer_name: string | null;
           row_sha256: string;
           total_cut_pcs: number;
         }>(
-          'SELECT work_order_no, row_sha256, total_cut_pcs FROM orders WHERE work_order_no = $1',
+          'SELECT work_order_no, customer_name, row_sha256, total_cut_pcs FROM orders WHERE work_order_no = $1',
           [row.woNo]
         );
 
@@ -138,11 +139,17 @@ export class GoogleSheetSyncService {
             ]
           );
         } else if (existingRes.rows[0].row_sha256 !== row.rowSha256) {
-          // CHANGED row
+          // CHANGED row or additional row with same work order
           changedCount++;
           const cutPcs = Number(existingRes.rows[0].total_cut_pcs || 0);
           const pendingPcs = Math.max(0, row.orderedPcs - cutPcs);
           const progressPct = row.orderedPcs > 0 ? Math.min(100, Math.round((cutPcs / row.orderedPcs) * 100)) : 0;
+
+          // Merge customer names to ensure all customers are retained (Issue 3)
+          const existingCusts = (existingRes.rows[0].customer_name || '').split(',').map(s => s.trim()).filter(Boolean);
+          const newCusts = (row.customerName || '').split(',').map(s => s.trim()).filter(Boolean);
+          const mergedCustomerName = Array.from(new Set([...existingCusts, ...newCusts])).join(', ') || row.customerName;
+
           await this.db.query(
             `UPDATE orders
              SET order_no = $1, customer_name = $2, total_required_pcs = $3,
@@ -151,7 +158,7 @@ export class GoogleSheetSyncService {
              WHERE work_order_no = $7`,
             [
               row.refCode || row.woNo,
-              row.customerName,
+              mergedCustomerName,
               row.orderedPcs,
               pendingPcs,
               progressPct,

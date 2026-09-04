@@ -61,8 +61,20 @@ export function createApiRouter(
             [j.job_id]
           );
           const completedCount = parseInt(completedRes.rows[0]?.count || '0', 10);
+
+          // Retain all distinct customers for active job from pieces & orders (Issue 3)
+          const pieceCustRes = await db.query<{ customer_name: string }>(
+            "SELECT DISTINCT customer_name FROM cnc_pieces WHERE job_id = $1 AND customer_name IS NOT NULL AND customer_name != ''",
+            [j.job_id]
+          );
+          const pieceCusts = pieceCustRes.rows.map(r => r.customer_name.trim()).filter(Boolean);
+          const jobCusts = (j.customer_name || '').split(',').map(s => s.trim()).filter(Boolean);
+          const distinctCusts = Array.from(new Set([...jobCusts, ...pieceCusts]));
+
           activeJobDetails = {
             ...j,
+            customer_name: distinctCusts.join(', ') || j.customer_name,
+            customerNames: distinctCusts,
             completedSheets: completedCount,
             progressPct: j.total_programmed_sheets > 0
               ? Math.round((completedCount / j.total_programmed_sheets) * 100)
@@ -117,9 +129,33 @@ export function createApiRouter(
     }
   });
 
-  // 3. List All Jobs
+  // 3. List Jobs with Server-Side Pagination and Aggregation (Issue 1)
   router.get('/jobs', async (req, res) => {
     try {
+      const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
+      const limit = Math.min(100, Math.max(10, parseInt((req.query.limit as string) || '50', 10)));
+      const offset = (page - 1) * limit;
+      const search = ((req.query.search as string) || '').trim();
+
+      let whereClause = '';
+      const params: any[] = [];
+
+      if (search) {
+        params.push(`%${search}%`);
+        whereClause = `WHERE j.job_id ILIKE $1 OR j.customer_name ILIKE $1 OR j.order_no ILIKE $1 OR j.material_code ILIKE $1`;
+      }
+
+      // Total count query
+      const countRes = await db.query<{ count: string }>(
+        `SELECT COUNT(*) as count FROM cnc_jobs j ${whereClause}`,
+        params
+      );
+      const total = parseInt(countRes.rows[0]?.count || '0', 10);
+
+      // Fast single query with aggregated completed_sheets count
+      const queryParams = search ? [params[0], limit, offset] : [limit, offset];
+      const limitOffsetIdx = search ? '$2 OFFSET $3' : '$1 OFFSET $2';
+
       const jobsRes = await db.query<{
         job_id: string;
         base_filename: string;
@@ -137,33 +173,55 @@ export function createApiRouter(
         first_detected_at: string;
         last_seen_at: string;
         status: string;
-      }>('SELECT * FROM cnc_jobs ORDER BY last_seen_at DESC');
-
-      const jobs = await Promise.all(
-        jobsRes.rows.map(async (j) => {
-          const compRes = await db.query<{ count: string }>(
-            "SELECT COUNT(DISTINCT sheet_index) as count FROM production_events WHERE job_id = $1 AND event_type = 'SHEET_COMPLETED'",
-            [j.job_id]
-          );
-          const completedSheets = parseInt(compRes.rows[0]?.count || '0', 10);
-          const progressPct =
-            j.total_programmed_sheets > 0
-              ? Math.min(100, Math.round((completedSheets / j.total_programmed_sheets) * 100))
-              : 0;
-
-          return {
-            ...j,
-            completedSheets,
-            progressPct,
-            sheet_width_mm: parseFloat(j.sheet_width_mm),
-            sheet_height_mm: parseFloat(j.sheet_height_mm),
-            sheet_thickness_mm: parseFloat(j.sheet_thickness_mm),
-            planned_waste_pct: j.planned_waste_pct ? parseFloat(j.planned_waste_pct) : null,
-          };
-        })
+        completed_sheets: string;
+      }>(
+        `SELECT
+           j.*,
+           COALESCE(pe.completed_count, 0) as completed_sheets
+         FROM cnc_jobs j
+         LEFT JOIN (
+           SELECT job_id, COUNT(DISTINCT sheet_index) as completed_count
+           FROM production_events
+           WHERE event_type = 'SHEET_COMPLETED'
+           GROUP BY job_id
+         ) pe ON pe.job_id = j.job_id
+         ${whereClause}
+         ORDER BY j.last_seen_at DESC
+         LIMIT ${limitOffsetIdx}`,
+        queryParams
       );
 
-      res.json({ jobs });
+      const jobs = jobsRes.rows.map((j) => {
+        const completedSheets = parseInt(j.completed_sheets || '0', 10);
+        const progressPct =
+          j.total_programmed_sheets > 0
+            ? Math.min(100, Math.round((completedSheets / j.total_programmed_sheets) * 100))
+            : 0;
+
+        const customerNames = (j.customer_name || '')
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean);
+
+        return {
+          ...j,
+          customerNames,
+          completedSheets,
+          progressPct,
+          sheet_width_mm: parseFloat(j.sheet_width_mm) || 0,
+          sheet_height_mm: parseFloat(j.sheet_height_mm) || 0,
+          sheet_thickness_mm: parseFloat(j.sheet_thickness_mm) || 0,
+          planned_waste_pct: j.planned_waste_pct ? parseFloat(j.planned_waste_pct) : null,
+        };
+      });
+
+      res.json({
+        jobs,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -202,9 +260,31 @@ export function createApiRouter(
     }
   });
 
-  // 5. Work Orders (Google Sheet linked with CNC production)
+  // 5. Work Orders with Server-Side Pagination and Aggregation (Issue 1 & 3)
   router.get('/orders', async (req, res) => {
     try {
+      const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
+      const limit = Math.min(100, Math.max(10, parseInt((req.query.limit as string) || '50', 10)));
+      const offset = (page - 1) * limit;
+      const search = ((req.query.search as string) || '').trim();
+
+      let whereClause = '';
+      const params: any[] = [];
+
+      if (search) {
+        params.push(`%${search}%`);
+        whereClause = `WHERE o.work_order_no ILIKE $1 OR o.customer_name ILIKE $1 OR o.order_no ILIKE $1`;
+      }
+
+      const countRes = await db.query<{ count: string }>(
+        `SELECT COUNT(*) as count FROM orders o ${whereClause}`,
+        params
+      );
+      const total = parseInt(countRes.rows[0]?.count || '0', 10);
+
+      const queryParams = search ? [params[0], limit, offset] : [limit, offset];
+      const limitOffsetIdx = search ? '$2 OFFSET $3' : '$1 OFFSET $2';
+
       const ordersRes = await db.query<{
         id: number;
         customer_id: string | null;
@@ -219,45 +299,63 @@ export function createApiRouter(
         created_at: string;
         updated_at: string;
         row_sha256: string | null;
-      }>('SELECT * FROM orders ORDER BY id ASC');
-
-      const ordersWithProduction = await Promise.all(
-        ordersRes.rows.map(async (o) => {
-          // Check produced pieces matching this Work Order No.
-          const prodRes = await db.query<{
-            cut_pieces: string;
-            job_id: string | null;
-          }>(
-            `SELECT
-               COUNT(p.id) as cut_pieces,
-               MAX(p.job_id) as job_id
-             FROM cnc_pieces p
-             WHERE p.order_no = $1 AND p.status = 'CUT'`,
-            [o.work_order_no]
-          );
-
-          const cutPieces = parseInt(prodRes.rows[0]?.cut_pieces || '0', 10);
-          const requiredPcs = Number(o.total_required_pcs || 0);
-          const completionPct = requiredPcs > 0
-            ? Math.min(100, Math.round((cutPieces / requiredPcs) * 100))
-            : (Number(o.overall_progress_pct) || 0);
-
-          return {
-            ...o,
-            work_order_no: o.work_order_no,
-            wo_no: o.work_order_no, // alias for frontend backwards compatibility
-            ref_code: o.order_no || '',
-            material: '',
-            ordered_pcs: requiredPcs,
-            producedPieces: cutPieces,
-            pendingPieces: Math.max(0, requiredPcs - cutPieces),
-            completionPct,
-            linkedJobId: prodRes.rows[0]?.job_id || null,
-          };
-        })
+        cut_pieces: string;
+        linked_job_id: string | null;
+      }>(
+        `SELECT
+           o.*,
+           COALESCE(p.cut_pieces, 0) as cut_pieces,
+           p.job_id as linked_job_id
+         FROM orders o
+         LEFT JOIN (
+           SELECT
+             COALESCE(wo_no, order_no) as wo_key,
+             COUNT(id) as cut_pieces,
+             MAX(job_id) as job_id
+           FROM cnc_pieces
+           WHERE status = 'CUT'
+           GROUP BY COALESCE(wo_no, order_no)
+         ) p ON p.wo_key = o.work_order_no
+         ${whereClause}
+         ORDER BY o.id ASC
+         LIMIT ${limitOffsetIdx}`,
+        queryParams
       );
 
-      res.json({ orders: ordersWithProduction });
+      const ordersWithProduction = ordersRes.rows.map((o) => {
+        const cutPieces = parseInt(o.cut_pieces || '0', 10);
+        const requiredPcs = Number(o.total_required_pcs || 0);
+        const completionPct = requiredPcs > 0
+          ? Math.min(100, Math.round((cutPieces / requiredPcs) * 100))
+          : (Number(o.overall_progress_pct) || 0);
+
+        const customers = (o.customer_name || '')
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean);
+
+        return {
+          ...o,
+          customers,
+          work_order_no: o.work_order_no,
+          wo_no: o.work_order_no,
+          ref_code: o.order_no || '',
+          material: '',
+          ordered_pcs: requiredPcs,
+          producedPieces: cutPieces,
+          pendingPieces: Math.max(0, requiredPcs - cutPieces),
+          completionPct,
+          linkedJobId: o.linked_job_id || null,
+        };
+      });
+
+      res.json({
+        orders: ordersWithProduction,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit) || 1,
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

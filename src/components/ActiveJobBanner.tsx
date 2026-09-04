@@ -9,7 +9,7 @@ interface ActiveJobBannerProps {
 
 export const ActiveJobBanner: React.FC<ActiveJobBannerProps> = ({ status, onSelectJob }) => {
   const activeJob = status?.activeJob;
-  const currentSheet = status?.currentSheetIndex ?? 1;
+  const currentSheet = status?.currentSheetIndex ?? null;
 
   if (!activeJob) {
     return (
@@ -55,15 +55,30 @@ export const ActiveJobBanner: React.FC<ActiveJobBannerProps> = ({ status, onSele
               )}
             </div>
 
-            <div className="mt-2 flex items-baseline space-x-4">
+            <div className="mt-2 flex flex-wrap items-baseline gap-3">
               <h2 className="text-xl font-bold text-white tracking-tight font-mono">
-                Sheet #{currentSheet} <span className="text-slate-500 text-base font-normal">of {totalSheets}</span>
+                {currentSheet !== null ? (
+                  <>Sheet #{currentSheet} <span className="text-slate-500 text-base font-normal">of {totalSheets}</span></>
+                ) : (
+                  <>Sheet <span className="text-amber-400">Unknown</span> <span className="text-slate-500 text-base font-normal">of {totalSheets}</span></>
+                )}
               </h2>
-              {activeJob.customer_name && (
+              {activeJob.customerNames && activeJob.customerNames.length > 1 ? (
+                <div className="flex items-center space-x-1.5">
+                  <span className="text-xs font-medium text-slate-400">Customers:</span>
+                  <div className="flex flex-wrap gap-1">
+                    {activeJob.customerNames.map((c: string, i: number) => (
+                      <span key={i} className="px-1.5 py-0.5 rounded bg-indigo-950/80 border border-indigo-700/60 text-indigo-300 text-xs font-semibold">
+                        {c}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : activeJob.customer_name ? (
                 <span className="text-sm font-medium text-slate-300">
                   Customer: <span className="text-indigo-300">{activeJob.customer_name}</span>
                 </span>
-              )}
+              ) : null}
             </div>
           </div>
 
