@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 import { newDb } from 'pg-mem';
+import { normalizeSharePath } from '../collector/cncMonitor.js';
 
 dotenv.config();
 
@@ -158,7 +159,8 @@ async function initSchema(db: IDbClient) {
   await db.query(`UPDATE cnc_jobs SET base_filename = file_base_name WHERE base_filename IS NULL AND file_base_name IS NOT NULL;`);
   await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS row_sha256 TEXT;`);
 
-  const defaultShare = process.env.CNC_SHARE_PATH || (fs.existsSync('./test_share') ? './test_share' : '\\\\192.168.11.211\\iso');
+  const rawShare = process.env.CNC_SHARE_PATH || (fs.existsSync('./test_share') ? './test_share' : '\\\\192.168.11.211\\iso');
+  const defaultShare = normalizeSharePath(rawShare);
 
   // Initialize monitor state singleton
   await db.query(`
@@ -167,6 +169,13 @@ async function initSchema(db: IDbClient) {
     ON CONFLICT (id) DO UPDATE SET
       share_path = EXCLUDED.share_path;
   `, [defaultShare]);
+
+  // Clean up any stale synthetic test jobs left in monitor state
+  await db.query(`
+    UPDATE cnc_monitor_state
+    SET active_job_id = NULL, current_sheet_index = NULL
+    WHERE active_job_id IN ('JOB_A', 'JOB_B');
+  `);
 
   // Initialize order sync state singleton
   await db.query(`

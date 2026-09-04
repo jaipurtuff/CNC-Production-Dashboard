@@ -2,6 +2,7 @@ import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
+import { normalizeSharePath } from '../collector/cncMonitor.js';
 
 dotenv.config();
 
@@ -91,12 +92,20 @@ export async function runMigrations(): Promise<void> {
     console.log('[Migration] Incremental column checks completed.');
 
     // 3. Initialize singleton states
-    const defaultShare = process.env.CNC_SHARE_PATH || '\\\\192.168.11.211\\iso';
+    const rawShare = process.env.CNC_SHARE_PATH || '\\\\192.168.11.211\\iso';
+    const defaultShare = normalizeSharePath(rawShare);
     await pool.query(`
       INSERT INTO cnc_monitor_state (id, is_online, share_path, total_jobs_tracked)
       VALUES (1, FALSE, $1, 0)
       ON CONFLICT (id) DO UPDATE SET share_path = EXCLUDED.share_path;
     `, [defaultShare]);
+
+    // Clean up any stale synthetic test jobs left in monitor state
+    await pool.query(`
+      UPDATE cnc_monitor_state
+      SET active_job_id = NULL, current_sheet_index = NULL
+      WHERE active_job_id IN ('JOB_A', 'JOB_B');
+    `);
 
     await pool.query(`
       INSERT INTO order_sync_state (id, status, rows_processed)

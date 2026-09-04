@@ -13,6 +13,50 @@ interface FileTrackingCache {
   firstSeenMs: number;
 }
 
+export function normalizeSharePath(rawPath: string): string {
+  if (!rawPath) return '';
+  let clean = rawPath.trim();
+
+  // Strip surrounding quotes (both double and single)
+  if (
+    (clean.startsWith('"') && clean.endsWith('"')) ||
+    (clean.startsWith("'") && clean.endsWith("'"))
+  ) {
+    clean = clean.slice(1, -1).trim();
+  }
+
+  // If path was escaped with 4+ leading backslashes: e.g. \\\\server\\share
+  if (clean.startsWith('\\\\\\\\')) {
+    clean = '\\\\' + clean.slice(4).replace(/\\\\/g, '\\');
+  }
+
+  // Convert forward slash UNC (//server/share) to backslash (\\server\share)
+  if (clean.startsWith('//')) {
+    clean = '\\\\' + clean.slice(2).replace(/\//g, '\\');
+  }
+
+  // If it starts with two backslashes: standard Windows UNC path
+  if (clean.startsWith('\\\\')) {
+    return '\\\\' + clean.slice(2).replace(/\\\\+/g, '\\').replace(/\//g, '\\');
+  }
+
+  // If leading double backslash was reduced to a single backslash by shell or dotenv escape:
+  // e.g. \192.168.11.211\iso or \192.168.11.211/iso
+  // UNC path format has server and share: \host\share...
+  if (/^\\[a-zA-Z0-9_.-]+[\\/]/.test(clean)) {
+    const withoutLeading = clean.slice(1);
+    return '\\\\' + withoutLeading.replace(/\\\\+/g, '\\').replace(/\//g, '\\');
+  }
+
+  // If it's a Windows drive letter path (e.g. C:\... or D:/...)
+  if (/^[a-zA-Z]:[\\/]/.test(clean)) {
+    return clean;
+  }
+
+  // Relative or Unix absolute path
+  return path.resolve(process.cwd(), clean);
+}
+
 export class CncMonitorService {
   private db: IDbClient;
   private sharePath: string;
@@ -32,7 +76,7 @@ export class CncMonitorService {
     offlineGraceSec: number = parseInt(process.env.CNC_OFFLINE_GRACE_SEC || '30', 10)
   ) {
     this.db = db;
-    this.sharePath = this.normalizeSharePath(sharePath);
+    this.sharePath = normalizeSharePath(sharePath);
     this.scanIntervalMs = scanIntervalMs;
     this.offlineGraceSec = offlineGraceSec;
 
@@ -40,11 +84,7 @@ export class CncMonitorService {
   }
 
   private normalizeSharePath(rawPath: string): string {
-    // Preserve Windows UNC network paths exactly as-is (e.g. \\192.168.11.211\iso)
-    if (rawPath.startsWith('\\\\') || rawPath.startsWith('//')) {
-      return rawPath;
-    }
-    return path.resolve(process.cwd(), rawPath);
+    return normalizeSharePath(rawPath);
   }
 
   public start() {
@@ -87,6 +127,7 @@ export class CncMonitorService {
       const now = Date.now();
       let isReachable = false;
       let dirEntries: string[] = [];
+      let reachabilityError: string | null = null;
 
       try {
         // Strictly read-only directory check
@@ -94,9 +135,16 @@ export class CncMonitorService {
           dirEntries = fs.readdirSync(this.sharePath);
           isReachable = true;
           this.lastReachableTime = now;
+        } else {
+          reachabilityError = `Share path does not exist or is not accessible: ${this.sharePath}`;
         }
       } catch (err: any) {
         isReachable = false;
+        reachabilityError = `Cannot access share '${this.sharePath}': ${err?.message || err}`;
+      }
+
+      if (!isReachable && reachabilityError) {
+        console.warn(`[CNC Monitor] ${reachabilityError}`);
       }
 
       // Evaluate reachability & grace period
@@ -107,13 +155,14 @@ export class CncMonitorService {
         this.isCurrentlyOnline = shouldBeOnline;
         await this.db.query(
           `UPDATE cnc_monitor_state
-           SET is_online = $1, last_reachable_at = $2, last_scan_at = $3, share_path = $4
+           SET is_online = $1, last_reachable_at = $2, last_scan_at = $3, share_path = $4, error_message = $5
            WHERE id = 1`,
           [
             shouldBeOnline,
             new Date(this.lastReachableTime).toISOString(),
             new Date(now).toISOString(),
             this.sharePath,
+            isReachable ? null : reachabilityError,
           ]
         );
 
@@ -124,16 +173,20 @@ export class CncMonitorService {
             shouldBeOnline ? 'CNC_ONLINE' : 'CNC_OFFLINE',
             shouldBeOnline
               ? `CNC Share is online and reachable at ${this.sharePath}`
-              : `CNC Share is OFFLINE. Unable to reach ${this.sharePath} (grace period exceeded)`,
+              : `CNC Share is OFFLINE. Unable to reach ${this.sharePath} (grace period exceeded)${reachabilityError ? ' - ' + reachabilityError : ''}`,
             new Date(now).toISOString(),
           ]
         );
       } else {
         await this.db.query(
           `UPDATE cnc_monitor_state
-           SET last_scan_at = $1, share_path = $2
+           SET last_scan_at = $1, share_path = $2, error_message = $3
            WHERE id = 1`,
-          [new Date(now).toISOString(), this.sharePath]
+          [
+            new Date(now).toISOString(),
+            this.sharePath,
+            isReachable ? null : reachabilityError,
+          ]
         );
       }
 
@@ -223,7 +276,8 @@ export class CncMonitorService {
         `UPDATE cnc_monitor_state
          SET active_job_id = $1,
              current_sheet_index = $2,
-             total_jobs_tracked = $3
+             total_jobs_tracked = $3,
+             error_message = NULL
          WHERE id = 1`,
         [activeJobId, currentSheetIdx, correlatedJobs.length]
       );

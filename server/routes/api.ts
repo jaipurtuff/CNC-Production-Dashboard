@@ -68,6 +68,14 @@ export function createApiRouter(
               ? Math.round((completedCount / j.total_programmed_sheets) * 100)
               : 0,
           };
+        } else {
+          // Self-heal orphaned active_job_id that does not exist in cnc_jobs (e.g. test artifacts)
+          await db.query(
+            'UPDATE cnc_monitor_state SET active_job_id = NULL, current_sheet_index = NULL WHERE id = 1 AND active_job_id = $1',
+            [monitor.active_job_id]
+          );
+          monitor.active_job_id = null;
+          monitor.current_sheet_index = null;
         }
       }
 

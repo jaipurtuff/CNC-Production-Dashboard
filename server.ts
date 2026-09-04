@@ -4,7 +4,7 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { getDb } from './server/db/index.js';
-import { CncMonitorService } from './server/collector/cncMonitor.js';
+import { CncMonitorService, normalizeSharePath } from './server/collector/cncMonitor.js';
 import { GoogleSheetSyncService } from './server/sync/googleSheetSync.js';
 import { createApiRouter } from './server/routes/api.js';
 
@@ -21,7 +21,7 @@ async function startServer() {
   console.log('[Server] Database initialized successfully.');
 
   const defaultShare = fs.existsSync('./test_share') ? './test_share' : '\\\\192.168.11.211\\iso';
-  const sharePath = process.env.CNC_SHARE_PATH || defaultShare;
+  const sharePath = normalizeSharePath(process.env.CNC_SHARE_PATH || defaultShare);
 
   // Initialize and start background services (runs continuously on the server)
   const cncMonitor = new CncMonitorService(db, sharePath);

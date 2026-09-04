@@ -321,6 +321,11 @@ N40 ST50="18-08-2026-A-06MM CLEAR------.R01"
     await testDb.query(`DELETE FROM cnc_pieces WHERE job_id IN ('JOB_A', 'JOB_B')`);
     await testDb.query(`DELETE FROM cnc_mother_sheets WHERE job_id IN ('JOB_A', 'JOB_B')`);
     await testDb.query(`DELETE FROM cnc_jobs WHERE job_id IN ('JOB_A', 'JOB_B')`);
+    await testDb.query(`
+      UPDATE cnc_monitor_state
+      SET active_job_id = NULL, current_sheet_index = NULL
+      WHERE active_job_id IN ('JOB_A', 'JOB_B');
+    `);
 
     // --- STEP 1: Day 1, Job A starts and completes 5 sheets ---
     const jobA_Day1: any = {
@@ -446,6 +451,11 @@ N40 ST50="18-08-2026-A-06MM CLEAR------.R01"
     await testDb.query(`DELETE FROM cnc_pieces WHERE job_id IN ('JOB_A', 'JOB_B')`);
     await testDb.query(`DELETE FROM cnc_mother_sheets WHERE job_id IN ('JOB_A', 'JOB_B')`);
     await testDb.query(`DELETE FROM cnc_jobs WHERE job_id IN ('JOB_A', 'JOB_B')`);
+    await testDb.query(`
+      UPDATE cnc_monitor_state
+      SET active_job_id = NULL, current_sheet_index = NULL
+      WHERE active_job_id IN ('JOB_A', 'JOB_B');
+    `);
   }
 
   // --- Test 8: Google Sheets API Value Parsing & Normalization ---
