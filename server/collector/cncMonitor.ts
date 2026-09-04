@@ -90,8 +90,10 @@ export class CncMonitorService {
   public start() {
     if (this.timer) return;
     console.log(`[CNC Monitor] Starting continuous read-only background monitor on: ${this.sharePath}`);
-    // Initial immediate scan
-    this.performScan().catch(err => console.error('[CNC Monitor] Error in initial scan:', err));
+    // Initial scan scheduled asynchronously on next event loop tick so start() never blocks caller
+    setImmediate(() => {
+      this.performScan().catch(err => console.error('[CNC Monitor] Error in initial scan:', err));
+    });
     // Continuous polling interval
     this.timer = setInterval(() => {
       this.performScan().catch(err => console.error('[CNC Monitor] Error in scan cycle:', err));
@@ -195,13 +197,23 @@ export class CncMonitorService {
         return;
       }
 
+      // Log reachability and enumeration counts
+      console.log(`[CNC Monitor] Scanning ${this.sharePath} (${dirEntries.length} directory entries found)`);
+
       // Discovered files matching .FBT, .OTD, .CNI, .z01
       const discovered: DiscoveredFile[] = [];
+      let entryIndex = 0;
 
       for (const entry of dirEntries) {
         const ext = path.extname(entry);
         const extUpper = ext.toUpperCase();
         if (!this.knownExtensions.has(extUpper)) continue;
+
+        entryIndex++;
+        // Cooperatively yield event loop every 20 files to keep HTTP server responsive during network I/O
+        if (entryIndex % 20 === 0) {
+          await new Promise(resolve => setImmediate(resolve));
+        }
 
         const fullPath = path.join(this.sharePath, entry);
         try {
@@ -264,6 +276,37 @@ export class CncMonitorService {
       for (const job of correlatedJobs) {
         await processJobStateTransition(this.db, job, new Date(now));
 
+        // Record discovered files into cnc_job_files table
+        const jobFiles = discovered.filter(f => f.baseName === job.jobId);
+        for (const file of jobFiles) {
+          const fileType = file.ext.replace('.', '').toUpperCase();
+          await this.db.query(
+            `INSERT INTO cnc_job_files (
+               job_id, file_type, filename, file_path, file_size_bytes, file_mtime, content_sha256, last_read_at, is_stable
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+             ON CONFLICT (job_id, file_type) DO UPDATE
+             SET filename = EXCLUDED.filename,
+                 file_path = EXCLUDED.file_path,
+                 file_size_bytes = EXCLUDED.file_size_bytes,
+                 file_mtime = EXCLUDED.file_mtime,
+                 content_sha256 = EXCLUDED.content_sha256,
+                 last_read_at = EXCLUDED.last_read_at,
+                 is_stable = EXCLUDED.is_stable`,
+            [
+              job.jobId,
+              fileType,
+              file.filename,
+              file.filePath,
+              file.size,
+              file.mtime.toISOString(),
+              file.sha256,
+              new Date(now).toISOString(),
+            ]
+          ).catch((fileDbErr) => {
+            console.warn(`[CNC Monitor] Could not record file ${file.filename} in cnc_job_files:`, fileDbErr?.message || fileDbErr);
+          });
+        }
+
         // Determine current active job (most recently modified job that has remaining sheets)
         if (job.completedSheetsCount < job.totalProgrammedSheets) {
           activeJobId = job.jobId;
@@ -281,6 +324,11 @@ export class CncMonitorService {
          WHERE id = 1`,
         [activeJobId, currentSheetIdx, correlatedJobs.length]
       );
+
+      const elapsedMs = Date.now() - now;
+      if (discovered.length > 0 || correlatedJobs.length > 0) {
+        console.log(`[CNC Monitor] Scan cycle completed in ${elapsedMs}ms: ${discovered.length} CNC files matched, ${correlatedJobs.length} jobs tracked`);
+      }
     } catch (err: any) {
       console.error('[CNC Monitor] Scan cycle failed:', err);
       await this.db.query(

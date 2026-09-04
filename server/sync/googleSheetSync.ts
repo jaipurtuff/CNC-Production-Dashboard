@@ -38,8 +38,10 @@ export class GoogleSheetSyncService {
     if (this.timer) return;
     console.log(`[Google Sheets API] Starting automatic background order sync (every ${Math.round(this.intervalMs / 1000 / 60)} minutes)`);
 
-    // Immediate initial sync
-    this.performSync().catch(err => console.error('[Google Sheets API] Error in initial sync:', err));
+    // Immediate initial sync scheduled asynchronously
+    setImmediate(() => {
+      this.performSync().catch(err => console.error('[Google Sheets API] Error in initial sync:', err));
+    });
 
     // Background recurring sync
     this.timer = setInterval(() => {

@@ -23,12 +23,9 @@ async function startServer() {
   const defaultShare = fs.existsSync('./test_share') ? './test_share' : '\\\\192.168.11.211\\iso';
   const sharePath = normalizeSharePath(process.env.CNC_SHARE_PATH || defaultShare);
 
-  // Initialize and start background services (runs continuously on the server)
+  // Initialize background services (started once HTTP server is listening)
   const cncMonitor = new CncMonitorService(db, sharePath);
-  cncMonitor.start();
-
   const googleSync = new GoogleSheetSyncService(db);
-  googleSync.start();
 
   // Mount API router
   app.use('/api', createApiRouter(db, cncMonitor, googleSync));
@@ -47,15 +44,18 @@ async function startServer() {
     next(err);
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== 'production') {
+  // Check if running in production mode (dist bundle exists or NODE_ENV=production)
+  const distPath = path.join(process.cwd(), 'dist');
+  const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+  const isProduction = process.env.NODE_ENV === 'production' || hasDist;
+
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
@@ -64,6 +64,10 @@ async function startServer() {
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Server] CNC Production Monitoring Server running on http://0.0.0.0:${PORT}`);
+
+    // Start background collector and sync services once HTTP server is actively listening
+    cncMonitor.start();
+    googleSync.start();
   });
 
   server.on('error', (err: any) => {
