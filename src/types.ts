@@ -43,6 +43,7 @@ export interface CncStatus {
     filename_date: string | null;
     otd_date: string | null;
     fbt_last_write: string | null;
+    fbt_file_mtime?: string | null;
     completedSheets: number;
     progressPct: number;
     last_seen_at: string;
@@ -103,6 +104,7 @@ export interface CncJobItem {
   filename_date: string | null;
   otd_date: string | null;
   fbt_last_write: string | null;
+  fbt_file_mtime?: string | null;
   first_detected_at: string;
   last_seen_at: string;
   status: string;

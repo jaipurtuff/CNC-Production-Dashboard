@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS cnc_jobs (
   filename_date TEXT,
   otd_date TEXT,
   fbt_last_write TEXT,
+  fbt_file_mtime TIMESTAMPTZ,
   fbt_file_path TEXT,
   otd_file_path TEXT,
   cni_file_path TEXT,

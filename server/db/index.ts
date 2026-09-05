@@ -155,6 +155,7 @@ async function initSchema(db: IDbClient) {
   // Column migration for cnc_jobs.file_base_name
   await db.query(`ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS file_base_name TEXT;`);
   await db.query(`ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS base_filename TEXT;`);
+  await db.query(`ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS fbt_file_mtime TIMESTAMPTZ;`);
   await db.query(`UPDATE cnc_jobs SET file_base_name = base_filename WHERE file_base_name IS NULL AND base_filename IS NOT NULL;`);
   await db.query(`UPDATE cnc_jobs SET base_filename = file_base_name WHERE base_filename IS NULL AND file_base_name IS NOT NULL;`);
   await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS row_sha256 TEXT;`);

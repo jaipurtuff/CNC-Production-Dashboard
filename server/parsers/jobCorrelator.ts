@@ -192,6 +192,7 @@ export function correlateJobFiles(baseName: string, files: DiscoveredFile[]): Co
     filenameDate,
     otdDate: parsedOtd?.otdDate,
     fbtLastWrite: parsedFbt?.lastWrite || undefined,
+    fbtFileMtime: jobFiles.fbt?.mtime,
     effectiveCuttingDate,
     effectiveCuttingDateStr,
     fbtUpdateTimestamp,

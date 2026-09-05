@@ -115,6 +115,7 @@ export interface CorrelatedCncJob {
   filenameDate?: string;
   otdDate?: string;
   fbtLastWrite?: string;
+  fbtFileMtime?: Date;
   effectiveCuttingDate?: Date;
   effectiveCuttingDateStr?: string;
   fbtUpdateTimestamp?: Date;

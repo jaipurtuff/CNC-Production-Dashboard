@@ -92,8 +92,8 @@ export async function processJobStateTransition(
         job_id, base_filename, total_programmed_sheets, total_layouts, total_planned_sheets,
         total_cut_sheets, total_pending_sheets, current_layout_index, sheet_width_mm, sheet_height_mm,
         sheet_thickness_mm, material_code, customer_name, order_no, planned_waste_pct,
-        filename_date, otd_date, fbt_last_write, first_detected_at, last_seen_at, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19, $20)`,
+        filename_date, otd_date, fbt_last_write, fbt_file_mtime, first_detected_at, last_seen_at, status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $20, $21)`,
       [
         job.jobId,
         job.baseFilename,
@@ -113,6 +113,7 @@ export async function processJobStateTransition(
         job.filenameDate || null,
         job.otdDate || null,
         job.fbtLastWrite || null,
+        job.fbtFileMtime ? job.fbtFileMtime.toISOString() : null,
         scanTime.toISOString(),
         isNowComplete ? 'COMPLETED' : 'ACTIVE',
       ]
@@ -256,7 +257,7 @@ export async function processJobStateTransition(
     const prev = previousLayoutMap.get(layoutIdx);
 
     const prevCnt = prev ? prev.cnt : 0;
-    const newlyCompleted = newCnt - prevCnt;
+    const newlyCompleted = Math.max(0, newCnt - prevCnt);
 
     const startOffset = layoutStartOffsets.get(layoutIdx) ?? 0;
     const areaSqm = (sheet.dimX / 1000) * (sheet.dimY / 1000);
@@ -417,7 +418,8 @@ export async function processJobStateTransition(
          current_layout_index = $5,
          last_seen_at = $6,
          status = $7,
-         fbt_last_write = COALESCE($8, fbt_last_write)
+         fbt_last_write = COALESCE($8, fbt_last_write),
+         fbt_file_mtime = COALESCE($10, fbt_file_mtime)
      WHERE job_id = $9`,
     [
       totalPlannedSheets,
@@ -429,6 +431,7 @@ export async function processJobStateTransition(
       isNowComplete ? 'COMPLETED' : 'ACTIVE',
       job.fbtLastWrite || null,
       job.jobId,
+      job.fbtFileMtime ? job.fbtFileMtime.toISOString() : null,
     ]
   );
 

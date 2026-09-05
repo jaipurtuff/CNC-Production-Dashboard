@@ -220,6 +220,12 @@ export const ActiveJobBanner: React.FC<ActiveJobBannerProps> = ({ status, onSele
             <span>Mat: {activeJob.sheet_thickness_mm}mm ({activeJob.material_code})</span>
             <span className="text-slate-600">•</span>
             <span>FBT Write: {activeJob.fbt_last_write || 'N/A'}</span>
+            {activeJob.fbt_file_mtime && (
+              <>
+                <span className="text-slate-600">•</span>
+                <span>FBT Modified: {new Date(activeJob.fbt_file_mtime).toLocaleString()}</span>
+              </>
+            )}
           </div>
 
           {onSelectJob && (

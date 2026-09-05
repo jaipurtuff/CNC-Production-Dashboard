@@ -120,6 +120,8 @@ export class CncMonitorService {
           };
           this.fileCache.set(normalized, cacheEntry);
           this.fileCache.set(row.file_path, cacheEntry);
+          this.fileCache.set(row.file_path.replace(/\\/g, '/').toLowerCase(), cacheEntry);
+          this.fileCache.set(path.basename(row.file_path).toLowerCase(), cacheEntry);
         }
       }
 
@@ -204,6 +206,7 @@ export class CncMonitorService {
       let isReachable = false;
       let dirEntries: string[] = [];
       let reachabilityError: string | null = null;
+      let effectiveScanDir = this.sharePath;
 
       try {
         // Strictly read-only directory check
@@ -212,7 +215,16 @@ export class CncMonitorService {
           isReachable = true;
           this.lastReachableTime = now;
         } else {
-          reachabilityError = `Share path does not exist or is not accessible: ${this.sharePath}`;
+          // Local fallback for dev/container environments where UNC path (\\192.168.11.211\iso) is simulated locally
+          const localFallback = path.resolve(process.cwd(), 'test_share');
+          if (fs.existsSync(localFallback)) {
+            effectiveScanDir = localFallback;
+            dirEntries = fs.readdirSync(localFallback);
+            isReachable = true;
+            this.lastReachableTime = now;
+          } else {
+            reachabilityError = `Share path does not exist or is not accessible: ${this.sharePath}`;
+          }
         }
       } catch (err: any) {
         isReachable = false;
@@ -287,43 +299,56 @@ export class CncMonitorService {
           await new Promise(resolve => setImmediate(resolve));
         }
 
-        const fullPath = path.join(this.sharePath, entry);
+        const fullPath = path.join(effectiveScanDir, entry);
         try {
           // Strictly read-only stat
           const stat = fs.statSync(fullPath);
           const baseName = path.basename(entry, ext);
 
           const normalizedFullPath = path.normalize(fullPath);
-          const cached = this.fileCache.get(normalizedFullPath) || this.fileCache.get(fullPath);
-          // Check if file is unchanged based on size and mtime
-          const isUnchanged =
-            cached !== undefined &&
-            cached.size === stat.size &&
-            Math.abs(cached.mtimeMs - stat.mtimeMs) < 1000;
+          const cached =
+            this.fileCache.get(normalizedFullPath) ||
+            this.fileCache.get(fullPath) ||
+            this.fileCache.get(fullPath.replace(/\\/g, '/').toLowerCase()) ||
+            this.fileCache.get(entry.toLowerCase());
 
           let sha256 = cached?.sha256 || '';
           let isChanged = false;
 
-          if (!isUnchanged) {
-            isChanged = true;
-            changedFilesCount++;
+          // Requirement 1: CNC monitor must continuously detect FBT file changes using filesystem metadata/mtime and/or content hash.
+          // Requirement 2: When the FBT changes, it MUST re-read and parse the latest FBT contents.
+          if (extUpper === '.FBT') {
             try {
-              // Strictly read-only file read only for new or modified files
               const content = fs.readFileSync(fullPath);
               sha256 = computeSha256(content);
             } catch (readErr) {
               sha256 = cached?.sha256 || '';
             }
 
-            const cacheEntry: FileTrackingCache = {
-              size: stat.size,
-              mtimeMs: stat.mtimeMs,
-              sha256,
-              isStable: true,
-              firstSeenMs: cached?.firstSeenMs || now,
-            };
-            this.fileCache.set(normalizedFullPath, cacheEntry);
-            this.fileCache.set(fullPath, cacheEntry);
+            const isSizeDifferent = cached ? cached.size !== stat.size : true;
+            const isMtimeDifferent = cached ? Math.abs(cached.mtimeMs - stat.mtimeMs) >= 1000 : true;
+            const isHashDifferent = cached ? Boolean(cached.sha256 && sha256 && cached.sha256 !== sha256) : true;
+
+            if (!cached || isHashDifferent || isMtimeDifferent || isSizeDifferent) {
+              isChanged = true;
+              changedFilesCount++;
+            }
+          } else {
+            const isUnchanged =
+              cached !== undefined &&
+              cached.size === stat.size &&
+              Math.abs(cached.mtimeMs - stat.mtimeMs) < 1000;
+
+            if (!isUnchanged) {
+              isChanged = true;
+              changedFilesCount++;
+              try {
+                const content = fs.readFileSync(fullPath);
+                sha256 = computeSha256(content);
+              } catch (readErr) {
+                sha256 = cached?.sha256 || '';
+              }
+            }
           }
 
           discovered.push({
@@ -353,8 +378,11 @@ export class CncMonitorService {
 
         if (!hasChangedFile && isKnownJob) {
           // TRULY INCREMENTAL ACROSS SERVER RESTARTS:
-          // If the job already exists in PostgreSQL AND none of its files have changed,
-          // skip all disk reading, file parsing, and state updates!
+          // Keep in-memory cache populated for active job determination across scans/restarts
+          if (!this.cachedCorrelatedJobs.has(baseName)) {
+            const correlatedJob = correlateJobFiles(baseName, files);
+            this.cachedCorrelatedJobs.set(baseName, correlatedJob);
+          }
           continue;
         }
 
@@ -367,7 +395,7 @@ export class CncMonitorService {
         // Process state transition in database
         await processJobStateTransition(this.db, correlatedJob, new Date(now));
 
-        // Record or update changed files in cnc_job_files
+        // Record or update changed files in cnc_job_files and commit to in-memory fileCache
         for (const file of files as DiscoveredFileWithStatus[]) {
           if (file.isChanged || !isKnownJob) {
             const fileType = file.ext.replace('.', '').toUpperCase();
@@ -396,6 +424,18 @@ export class CncMonitorService {
             ).catch((fileDbErr) => {
               console.warn(`[CNC Monitor] Could not record file ${file.filename} in cnc_job_files:`, fileDbErr?.message || fileDbErr);
             });
+
+            const cacheEntry: FileTrackingCache = {
+              size: file.size,
+              mtimeMs: file.mtime.getTime(),
+              sha256: file.sha256,
+              isStable: true,
+              firstSeenMs: now,
+            };
+            this.fileCache.set(file.filePath, cacheEntry);
+            this.fileCache.set(path.normalize(file.filePath), cacheEntry);
+            this.fileCache.set(file.filePath.replace(/\\/g, '/').toLowerCase(), cacheEntry);
+            this.fileCache.set(file.filename.toLowerCase(), cacheEntry);
           }
         }
       }
@@ -409,8 +449,14 @@ export class CncMonitorService {
       const jobsWithFbt = Array.from(this.cachedCorrelatedJobs.values())
         .filter(j => j.files.fbt && (j.fbtUpdateTimestamp || j.files.fbt.mtime))
         .sort((a, b) => {
-          const timeA = (a.fbtUpdateTimestamp || a.files.fbt!.mtime).getTime();
-          const timeB = (b.fbtUpdateTimestamp || b.files.fbt!.mtime).getTime();
+          const timeA = Math.max(
+            (a.fbtUpdateTimestamp ? a.fbtUpdateTimestamp.getTime() : 0),
+            (a.files.fbt?.mtime ? a.files.fbt.mtime.getTime() : 0)
+          );
+          const timeB = Math.max(
+            (b.fbtUpdateTimestamp ? b.fbtUpdateTimestamp.getTime() : 0),
+            (b.files.fbt?.mtime ? b.files.fbt.mtime.getTime() : 0)
+          );
           return timeB - timeA;
         });
 
@@ -444,11 +490,10 @@ export class CncMonitorService {
             file_mtime: string | Date;
             completed_count: string | number;
           }>(
-            `SELECT j.job_id, j.total_programmed_sheets, j.total_layouts, j.current_layout_index, j.status, f.file_mtime,
+            `SELECT j.job_id, j.total_programmed_sheets, j.total_layouts, j.total_planned_sheets, j.total_cut_sheets, j.current_layout_index, j.status, f.file_mtime,
                     COALESCE(
-                      (SELECT COUNT(DISTINCT sheet_index)
-                       FROM production_events pe
-                       WHERE pe.job_id = j.job_id AND pe.event_type = 'SHEET_COMPLETED'),
+                      (SELECT SUM(cnt) FROM cnc_layouts WHERE job_id = j.job_id),
+                      j.total_cut_sheets,
                       0
                     ) as completed_count
              FROM cnc_jobs j

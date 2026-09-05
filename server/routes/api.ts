@@ -96,10 +96,17 @@ export function createApiRouter(
             : ((j as any).total_planned_sheets || j.total_programmed_sheets || 0);
           const totalCutSheets = layouts.length > 0
             ? layouts.reduce((sum, l) => sum + Number(l.cnt), 0)
-            : completedCount;
+            : (Number((j as any).total_cut_sheets) || 0);
           const totalPendingSheets = layouts.length > 0
             ? layouts.reduce((sum, l) => sum + Math.max(0, Number(l.qta) - Number(l.cnt)), 0)
             : Math.max(0, totalPlannedSheets - totalCutSheets);
+
+          // Get filesystem mtime for FBT file
+          const fbtFileRes = await db.query<{ file_mtime: string | Date }>(
+            "SELECT file_mtime FROM cnc_job_files WHERE job_id = $1 AND file_type = 'FBT'",
+            [j.job_id]
+          );
+          const fbtFileMtime = (j as any).fbt_file_mtime || fbtFileRes.rows[0]?.file_mtime || null;
 
           // Find the logical next incomplete layout where Cnt < Qta
           const nextIncompleteLayout = layouts.find(l => Number(l.cnt) < Number(l.qta));
@@ -108,6 +115,8 @@ export function createApiRouter(
 
           activeJobDetails = {
             ...j,
+            fbt_last_write: (j as any).fbt_last_write || null,
+            fbt_file_mtime: fbtFileMtime,
             customer_name: distinctCusts.join(', ') || j.customer_name,
             customerNames: distinctCusts,
             total_layouts: totalLayouts,

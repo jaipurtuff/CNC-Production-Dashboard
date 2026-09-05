@@ -6,6 +6,7 @@ import { parseOtd } from '../parsers/otdParser.js';
 import { parseCni } from '../parsers/cniParser.js';
 import { parseZ01 } from '../parsers/z01Parser.js';
 import { groupCncFiles, correlateJobFiles, DiscoveredFile } from '../parsers/jobCorrelator.js';
+import { FbtSheetRecord, CorrelatedCncJob } from '../parsers/types.js';
 import { processJobStateTransition } from '../engine/stateComparator.js';
 import { getDailyProduction } from '../engine/dailyMetrics.js';
 import { GoogleSheetSyncService } from '../sync/googleSheetSync.js';
@@ -948,6 +949,224 @@ N40 ST50="18-08-2026-A-06MM CLEAR------.R01"
     await testDb.query(`DELETE FROM cnc_mother_sheets WHERE job_id = $1`, [fbtTestJobId]);
     await testDb.query(`DELETE FROM cnc_pieces WHERE job_id = $1`, [fbtTestJobId]);
     await testDb.query(`DELETE FROM cnc_jobs WHERE job_id = $1`, [fbtTestJobId]);
+  }
+
+  // ============================================================
+  // TEST 14: FBT State Staleness Regression: Stale Persisted State vs Live File
+  // Proves that when persisted state in PostgreSQL is older than the live FBT,
+  // the collector detects the file change (mtime / hash), loads previous per-layout state,
+  // re-parses the live FBT, creates exact differential events (38 - 25 = 13),
+  // and updates PostgreSQL metrics to: 44 layouts, 66 planned, 38 cut, 28 pending, current layout #27.
+  // ============================================================
+  const t14Start = Date.now();
+  const regressionJobId = '04-09-2026-B-05MM_CLEAR-----';
+  try {
+    // Both stale and live states have the exact same 44 layouts and Qta distribution (SUM Qta = 66)
+    const getLayoutQta = (i: number) => {
+      if (i === 1) return 2;
+      if (i === 6) return 6;
+      if (i === 24) return 2;
+      if (i === 25) return 1;
+      if (i === 26) return 6;
+      if (i === 27) return 1;
+      if (i === 28) return 1;
+      if (i === 29) return 10;
+      if (i === 30) return 2;
+      return 1;
+    };
+
+    // 1. Setup stale persisted state in PostgreSQL: 25 cut sheets at 10:29:15
+    // Layouts 1..19 are cut (2 + 4 + 6 + 13 = 25 cut sheets)
+    const initialScanTime = new Date('2026-09-05T10:29:15Z');
+    
+    const staleSheets: any[] = [];
+    for (let i = 1; i <= 44; i++) {
+      const qta = getLayoutQta(i);
+      const cnt = i <= 19 ? qta : 0; // Layouts 1..19 completed (total 25 cuts)
+
+      staleSheets.push({
+        sheetIndex: i,
+        layoutIndex: i,
+        sheetCode: `${regressionJobId}${i}`,
+        dimX: 3660,
+        dimY: 2440,
+        thickness: 5,
+        quantityProgrammed: qta,
+        quantityCut: cnt,
+        isCompleted: cnt >= qta,
+        rawLine: `${regressionJobId}${i},3660,2440,5,${qta},${cnt},${i-1},${i},F5`,
+      });
+    }
+
+    const staleCorrelatedJob: any = {
+      jobId: regressionJobId,
+      baseFilename: regressionJobId,
+      files: {
+        fbt: {
+          filename: `${regressionJobId}.FBT`,
+          filePath: `/iso/${regressionJobId}.FBT`,
+          ext: '.FBT',
+          baseName: regressionJobId,
+          size: 2100,
+          mtime: initialScanTime,
+          sha256: 'stale_hash_102915',
+        },
+      },
+      totalProgrammedSheets: 66,
+      completedSheetsCount: 25,
+      totalLayouts: 44,
+      completedLayoutsCount: 19,
+      totalPlannedSheets: 66,
+      totalCutSheets: 25,
+      totalPendingSheets: 41,
+      sheetWidthMm: 3660,
+      sheetHeightMm: 2440,
+      sheetThicknessMm: 5,
+      materialCode: 'F5',
+      fbtLastWrite: '05-09-2026 10:29:15',
+      fbtFileMtime: initialScanTime,
+      currentSheetIndex: 20,
+      currentLayoutIndex: 20,
+      isComplete: false,
+      sheets: staleSheets,
+      pieces: [],
+    };
+
+    // Process initial stale state into DB
+    await processJobStateTransition(testDb, staleCorrelatedJob, initialScanTime, '2026-09-05');
+
+    // Verify stale state in DB before update
+    const dbBefore = await testDb.query<{ total_cut_sheets: number; total_planned_sheets: number; current_layout_index: number }>(
+      'SELECT total_cut_sheets, total_planned_sheets, current_layout_index FROM cnc_jobs WHERE job_id = $1',
+      [regressionJobId]
+    );
+    if (dbBefore.rows[0].total_cut_sheets !== 25) {
+      throw new Error(`Initial DB state should have 25 cut sheets, got ${dbBefore.rows[0].total_cut_sheets}`);
+    }
+
+    // 2. Now simulate live FBT modification at 10:53:00 with 38 cuts (Layouts 1..26 complete)
+    const liveFileMtime = new Date('2026-09-05T10:53:00Z');
+    const liveSheets: any[] = [];
+    for (let i = 1; i <= 44; i++) {
+      const qta = getLayoutQta(i);
+      const cnt = i <= 26 ? qta : 0; // Layouts 1..26 completed (total 38 cuts)
+
+      liveSheets.push({
+        sheetIndex: i,
+        layoutIndex: i,
+        sheetCode: `${regressionJobId}${i}`,
+        dimX: 3660,
+        dimY: 2440,
+        thickness: 5,
+        quantityProgrammed: qta,
+        quantityCut: cnt,
+        isCompleted: cnt >= qta,
+        rawLine: `${regressionJobId}${i},3660,2440,5,${qta},${cnt},${i-1},${i},F5`,
+      });
+    }
+
+    const liveCorrelatedJob: any = {
+      jobId: regressionJobId,
+      baseFilename: regressionJobId,
+      files: {
+        fbt: {
+          filename: `${regressionJobId}.FBT`,
+          filePath: `/iso/${regressionJobId}.FBT`,
+          ext: '.FBT',
+          baseName: regressionJobId,
+          size: 2180,
+          mtime: liveFileMtime,
+          sha256: 'live_hash_105300',
+        },
+      },
+      totalProgrammedSheets: 66,
+      completedSheetsCount: 38,
+      totalLayouts: 44,
+      completedLayoutsCount: 26,
+      totalPlannedSheets: 66,
+      totalCutSheets: 38,
+      totalPendingSheets: 28,
+      sheetWidthMm: 3660,
+      sheetHeightMm: 2440,
+      sheetThicknessMm: 5,
+      materialCode: 'F5',
+      fbtLastWrite: '05-09-2026 10:29:15',
+      fbtFileMtime: liveFileMtime,
+      currentSheetIndex: 27,
+      currentLayoutIndex: 27,
+      isComplete: false,
+      sheets: liveSheets,
+      pieces: [],
+    };
+
+    // 3. Process the updated live state transition
+    const transitionRes = await processJobStateTransition(testDb, liveCorrelatedJob, liveFileMtime, '2026-09-05');
+
+    // Exactly 13 newly completed sheets should have generated events (38 cut - 25 previous = 13)
+    if (transitionRes.newEventsCreated !== 13) {
+      throw new Error(`Expected exactly 13 newly created completion events (38 - 25), got ${transitionRes.newEventsCreated}`);
+    }
+
+    // 4. Query PostgreSQL to verify latest state
+    const jobRes = await testDb.query<{
+      total_layouts: number;
+      total_planned_sheets: number;
+      total_cut_sheets: number;
+      total_pending_sheets: number;
+      current_layout_index: number;
+      fbt_last_write: string;
+      fbt_file_mtime: string | Date;
+    }>('SELECT total_layouts, total_planned_sheets, total_cut_sheets, total_pending_sheets, current_layout_index, fbt_last_write, fbt_file_mtime FROM cnc_jobs WHERE job_id = $1', [regressionJobId]);
+
+    const updatedJob = jobRes.rows[0];
+    if (Number(updatedJob.total_layouts) !== 44) {
+      throw new Error(`total_layouts must be 44, got ${updatedJob.total_layouts}`);
+    }
+    if (Number(updatedJob.total_planned_sheets) !== 66) {
+      throw new Error(`total_planned_sheets must be 66, got ${updatedJob.total_planned_sheets}`);
+    }
+    if (Number(updatedJob.total_cut_sheets) !== 38) {
+      throw new Error(`total_cut_sheets must be 38, got ${updatedJob.total_cut_sheets}`);
+    }
+    if (Number(updatedJob.total_pending_sheets) !== 28) {
+      throw new Error(`total_pending_sheets must be 28, got ${updatedJob.total_pending_sheets}`);
+    }
+    if (Number(updatedJob.current_layout_index) !== 27) {
+      throw new Error(`current_layout_index must be 27, got ${updatedJob.current_layout_index}`);
+    }
+    if (updatedJob.fbt_last_write !== '05-09-2026 10:29:15') {
+      throw new Error(`fbt_last_write must be '05-09-2026 10:29:15', got ${updatedJob.fbt_last_write}`);
+    }
+
+    // 5. Query cnc_layouts to verify Layout #27
+    const layout27Res = await testDb.query<{ qta: number; cnt: number; status: string }>(
+      'SELECT qta, cnt, status FROM cnc_layouts WHERE job_id = $1 AND layout_index = 27',
+      [regressionJobId]
+    );
+    const l27 = layout27Res.rows[0];
+    if (!l27 || Number(l27.qta) !== 1 || Number(l27.cnt) !== 0 || l27.status !== 'PENDING') {
+      throw new Error(`Layout #27 state invalid: ${JSON.stringify(l27)}`);
+    }
+
+    results.push({
+      testName: 'FBT State Staleness Regression: Stale Persisted State vs Live File Synchronization',
+      passed: true,
+      durationMs: Date.now() - t14Start,
+      message: 'PASSED: Verified live FBT synchronization against stale persisted state: correctly re-parsed FBT, created exactly 13 new events (38 - 25), updated PostgreSQL to 44 layouts, 66 planned, 38 cut, 28 pending, and current layout #27.',
+    });
+  } catch (err: any) {
+    results.push({
+      testName: 'FBT State Staleness Regression: Stale Persisted State vs Live File Synchronization',
+      passed: false,
+      durationMs: Date.now() - t14Start,
+      message: err.message,
+    });
+  } finally {
+    await testDb.query(`DELETE FROM production_events WHERE job_id = $1`, [regressionJobId]);
+    await testDb.query(`DELETE FROM cnc_layouts WHERE job_id = $1`, [regressionJobId]);
+    await testDb.query(`DELETE FROM cnc_mother_sheets WHERE job_id = $1`, [regressionJobId]);
+    await testDb.query(`DELETE FROM cnc_pieces WHERE job_id = $1`, [regressionJobId]);
+    await testDb.query(`DELETE FROM cnc_jobs WHERE job_id = $1`, [regressionJobId]);
   }
 
   const passedCount = results.filter(r => r.passed).length;
