@@ -4,6 +4,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { newDb } from 'pg-mem';
 import { normalizeSharePath } from '../collector/cncMonitor.js';
+import { runDatabaseMigrations } from './migrations.js';
 
 dotenv.config();
 
@@ -148,42 +149,8 @@ export async function createTestDb(): Promise<IDbClient> {
 }
 
 async function initSchema(db: IDbClient) {
-  const schemaPath = path.resolve(process.cwd(), 'server/db/schema.sql');
-  const schemaSql = fs.readFileSync(schemaPath, 'utf-8');
-  await db.exec(schemaSql);
-
-  // Column migration for cnc_jobs.file_base_name
-  await db.query(`ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS file_base_name TEXT;`);
-  await db.query(`ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS base_filename TEXT;`);
-  await db.query(`ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS fbt_file_mtime TIMESTAMPTZ;`);
-  await db.query(`UPDATE cnc_jobs SET file_base_name = base_filename WHERE file_base_name IS NULL AND base_filename IS NOT NULL;`);
-  await db.query(`UPDATE cnc_jobs SET base_filename = file_base_name WHERE base_filename IS NULL AND file_base_name IS NOT NULL;`);
-  await db.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS row_sha256 TEXT;`);
-
-  const rawShare = process.env.CNC_SHARE_PATH || (fs.existsSync('./test_share') ? './test_share' : '\\\\192.168.11.211\\iso');
-  const defaultShare = normalizeSharePath(rawShare);
-
-  // Initialize monitor state singleton
-  await db.query(`
-    INSERT INTO cnc_monitor_state (id, is_online, share_path, total_jobs_tracked)
-    VALUES (1, TRUE, $1, 0)
-    ON CONFLICT (id) DO UPDATE SET
-      share_path = EXCLUDED.share_path;
-  `, [defaultShare]);
-
-  // Clean up any stale synthetic test jobs left in monitor state
-  await db.query(`
-    UPDATE cnc_monitor_state
-    SET active_job_id = NULL, current_sheet_index = NULL
-    WHERE active_job_id IN ('JOB_A', 'JOB_B');
-  `);
-
-  // Initialize order sync state singleton
-  await db.query(`
-    INSERT INTO order_sync_state (id, status, rows_processed)
-    VALUES (1, 'IDLE', 0)
-    ON CONFLICT (id) DO NOTHING;
-  `);
+  // Run idempotent migrations ensuring tables, columns (including qta and cnt), and backfills are applied
+  await runDatabaseMigrations(db);
 }
 
 async function seedSampleProductionData(db: IDbClient) {

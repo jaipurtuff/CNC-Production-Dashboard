@@ -72,24 +72,29 @@ export function createApiRouter(
           const distinctCusts = Array.from(new Set([...jobCusts, ...pieceCusts]));
 
           // Query layout breakdown from cnc_layouts
-          const layoutsRes = await db.query<{
-            layout_index: number;
-            layout_code: string;
-            dim_x: number;
-            dim_y: number;
-            thickness_mm: number;
-            qta: number;
-            cnt: number;
-            status: string;
-          }>(
-            `SELECT layout_index, layout_code, dim_x, dim_y, thickness_mm, qta, cnt, status
-             FROM cnc_layouts
-             WHERE job_id = $1
-             ORDER BY layout_index ASC`,
-            [j.job_id]
-          );
-
-          const layouts = layoutsRes.rows;
+          let layouts: any[] = [];
+          try {
+            const layoutsRes = await db.query<{
+              layout_index: number;
+              layout_code: string;
+              dim_x: number;
+              dim_y: number;
+              thickness_mm: number;
+              qta: number;
+              cnt: number;
+              status: string;
+            }>(
+              `SELECT layout_index, layout_code, dim_x, dim_y, thickness_mm, qta, cnt, status
+               FROM cnc_layouts
+               WHERE job_id = $1
+               ORDER BY layout_index ASC`,
+              [j.job_id]
+            );
+            layouts = layoutsRes.rows;
+          } catch (layoutErr: any) {
+            console.warn(`[API] Note: unable to query cnc_layouts for job ${j.job_id}:`, layoutErr.message);
+            layouts = [];
+          }
           const totalLayouts = layouts.length || (j as any).total_layouts || 0;
           const totalPlannedSheets = layouts.length > 0
             ? layouts.reduce((sum, l) => sum + Number(l.qta), 0)

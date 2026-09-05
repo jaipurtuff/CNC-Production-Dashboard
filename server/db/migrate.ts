@@ -1,8 +1,7 @@
 import pg from 'pg';
-import fs from 'fs';
-import path from 'path';
 import dotenv from 'dotenv';
-import { normalizeSharePath } from '../collector/cncMonitor.js';
+import { runDatabaseMigrations } from './migrations.js';
+import { PostgresPoolClient } from './index.js';
 
 dotenv.config();
 
@@ -39,107 +38,14 @@ export async function runMigrations(): Promise<void> {
 
   const { displayTarget } = formatPostgresTarget(databaseUrl.trim());
   console.log(`[Migration] Connecting to PostgreSQL at ${displayTarget}...`);
-  const pool = new Pool({
-    connectionString: databaseUrl.trim(),
-    ssl: databaseUrl.includes('sslmode=require') ? { rejectUnauthorized: false } : undefined,
-  });
+  const client = new PostgresPoolClient(databaseUrl.trim());
 
   try {
-    const probe = await pool.query('SELECT current_user, current_database(), version()');
+    const probe = await client.query('SELECT current_user, current_database(), version()');
     const { current_user, current_database } = probe.rows[0];
     console.log(`[Migration] Connected to PostgreSQL at ${displayTarget} (Database: "${current_database}", User: "${current_user}").`);
 
-    // 1. Run base schema
-    const schemaPath = path.resolve(process.cwd(), 'server/db/schema.sql');
-    const schemaSql = fs.readFileSync(schemaPath, 'utf-8');
-    await pool.query(schemaSql);
-    console.log('[Migration] Base schema applied (tables and indexes created/verified).');
-
-    // 2. Run column updates (idempotent ALTER TABLE ... ADD COLUMN IF NOT EXISTS)
-    const columnMigrations = [
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS file_base_name TEXT;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS base_filename TEXT;`,
-      `UPDATE cnc_jobs SET file_base_name = base_filename WHERE file_base_name IS NULL AND base_filename IS NOT NULL;`,
-      `UPDATE cnc_jobs SET base_filename = file_base_name WHERE base_filename IS NULL AND file_base_name IS NOT NULL;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS material TEXT;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS material_code TEXT;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS fbt_file_path TEXT;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS otd_file_path TEXT;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS cni_file_path TEXT;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS z01_file_path TEXT;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS opt_project_name TEXT;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS total_layouts INTEGER DEFAULT 0;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS total_planned_sheets INTEGER DEFAULT 0;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS total_cut_sheets INTEGER DEFAULT 0;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS total_pending_sheets INTEGER DEFAULT 0;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS current_layout_index INTEGER;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS first_scanned_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;`,
-      `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS last_scanned_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;`,
-      `ALTER TABLE cnc_mother_sheets ADD COLUMN IF NOT EXISTS layout_index INTEGER;`,
-      `ALTER TABLE cnc_mother_sheets ADD COLUMN IF NOT EXISTS qta INTEGER DEFAULT 1;`,
-      `ALTER TABLE cnc_mother_sheets ADD COLUMN IF NOT EXISTS cnt INTEGER DEFAULT 0;`,
-      `ALTER TABLE cnc_mother_sheets ADD COLUMN IF NOT EXISTS is_completed BOOLEAN DEFAULT FALSE;`,
-      `ALTER TABLE cnc_pieces ADD COLUMN IF NOT EXISTS wo_no TEXT;`,
-      `ALTER TABLE cnc_pieces ADD COLUMN IF NOT EXISTS sheet_width_mm NUMERIC(10,2);`,
-      `ALTER TABLE cnc_pieces ADD COLUMN IF NOT EXISTS sheet_height_mm NUMERIC(10,2);`,
-      `ALTER TABLE cnc_pieces ADD COLUMN IF NOT EXISTS is_cut BOOLEAN DEFAULT FALSE;`,
-      `ALTER TABLE cnc_pieces ADD COLUMN IF NOT EXISTS cut_at TIMESTAMPTZ;`,
-      `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS layout_index INTEGER;`,
-      `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS layout_cut_index INTEGER;`,
-      `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS sheet_code TEXT;`,
-      `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS width_mm NUMERIC(10,2);`,
-      `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS height_mm NUMERIC(10,2);`,
-      `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS thickness_mm NUMERIC(10,2);`,
-      `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS material TEXT;`,
-      `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS cut_time TIMESTAMPTZ;`,
-      `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS event_date DATE;`,
-      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS row_sha256 TEXT;`,
-      `CREATE TABLE IF NOT EXISTS cnc_layouts (
-        id SERIAL PRIMARY KEY,
-        job_id TEXT NOT NULL REFERENCES cnc_jobs(job_id) ON DELETE CASCADE,
-        layout_index INTEGER NOT NULL,
-        layout_code TEXT NOT NULL,
-        dim_x NUMERIC(10, 2) NOT NULL,
-        dim_y NUMERIC(10, 2) NOT NULL,
-        thickness_mm NUMERIC(10, 2) NOT NULL,
-        area_sqm NUMERIC(10, 4) NOT NULL,
-        qta INTEGER NOT NULL DEFAULT 1,
-        cnt INTEGER NOT NULL DEFAULT 0,
-        raw_line TEXT,
-        status TEXT NOT NULL DEFAULT 'PENDING',
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(job_id, layout_index)
-      );`,
-      `CREATE INDEX IF NOT EXISTS idx_cnc_layouts_job ON cnc_layouts(job_id);`,
-    ];
-
-    for (const statement of columnMigrations) {
-      await pool.query(statement);
-    }
-    console.log('[Migration] Incremental column checks completed.');
-
-    // 3. Initialize singleton states
-    const rawShare = process.env.CNC_SHARE_PATH || '\\\\192.168.11.211\\iso';
-    const defaultShare = normalizeSharePath(rawShare);
-    await pool.query(`
-      INSERT INTO cnc_monitor_state (id, is_online, share_path, total_jobs_tracked)
-      VALUES (1, FALSE, $1, 0)
-      ON CONFLICT (id) DO UPDATE SET share_path = EXCLUDED.share_path;
-    `, [defaultShare]);
-
-    // Clean up any stale synthetic test jobs left in monitor state
-    await pool.query(`
-      UPDATE cnc_monitor_state
-      SET active_job_id = NULL, current_sheet_index = NULL
-      WHERE active_job_id IN ('JOB_A', 'JOB_B');
-    `);
-
-    await pool.query(`
-      INSERT INTO order_sync_state (id, status, rows_processed)
-      VALUES (1, 'IDLE', 0)
-      ON CONFLICT (id) DO NOTHING;
-    `);
-    console.log('[Migration] Singleton states verified.');
+    await runDatabaseMigrations(client);
 
     console.log('================================================================');
     console.log(`[Migration] SUCCESS: PostgreSQL database "${current_database}" is fully migrated.`);
@@ -148,9 +54,16 @@ export async function runMigrations(): Promise<void> {
     console.error('[Migration Error] Migration failed:', err.message);
     process.exit(1);
   } finally {
-    await pool.end();
+    if (client.close) {
+      await client.close();
+    }
   }
 }
 
 // Execute migration if invoked via CLI
-runMigrations();
+if (process.argv[1] && process.argv[1].includes('migrate')) {
+  runMigrations().catch(err => {
+    console.error('[Migration Error]', err);
+    process.exit(1);
+  });
+}

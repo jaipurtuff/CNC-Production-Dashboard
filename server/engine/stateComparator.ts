@@ -193,24 +193,52 @@ export async function processJobStateTransition(
 
   // If cnc_layouts was empty, check cnc_mother_sheets
   if (previousLayoutMap.size === 0) {
-    const fallbackRes = await db.query<{
-      sheet_index: number;
-      qta: number;
-      cnt: number;
-      status: string;
-    }>(
-      `SELECT sheet_index, COALESCE(qta, 1) as qta, COALESCE(cnt, 0) as cnt, status
-       FROM cnc_mother_sheets
-       WHERE job_id = $1
-       ORDER BY sheet_index ASC`,
-      [job.jobId]
-    );
-    for (const row of fallbackRes.rows) {
-      previousLayoutMap.set(row.sheet_index, {
-        qta: row.qta,
-        cnt: row.cnt,
-        status: row.status,
-      });
+    try {
+      const fallbackRes = await db.query<{
+        sheet_index: number;
+        qta: number;
+        cnt: number;
+        status: string;
+      }>(
+        `SELECT sheet_index, COALESCE(qta, 1) as qta, COALESCE(cnt, 0) as cnt, status
+         FROM cnc_mother_sheets
+         WHERE job_id = $1
+         ORDER BY sheet_index ASC`,
+        [job.jobId]
+      );
+      for (const row of fallbackRes.rows) {
+        previousLayoutMap.set(row.sheet_index, {
+          qta: Number(row.qta) || 1,
+          cnt: Number(row.cnt) || 0,
+          status: row.status,
+        });
+      }
+    } catch (err: any) {
+      // Safe fallback if legacy cnc_mother_sheets was queried without qta column
+      if (err?.message?.includes('qta') || err?.message?.includes('column')) {
+        console.warn('[State Comparator] Note: querying legacy cnc_mother_sheets without qta column:', err.message);
+        const legacyRes = await db.query<{
+          sheet_index: number;
+          status: string;
+          is_completed?: boolean;
+        }>(
+          `SELECT sheet_index, status, is_completed
+           FROM cnc_mother_sheets
+           WHERE job_id = $1
+           ORDER BY sheet_index ASC`,
+          [job.jobId]
+        );
+        for (const row of legacyRes.rows) {
+          const isDone = row.is_completed || row.status === 'COMPLETED';
+          previousLayoutMap.set(row.sheet_index, {
+            qta: 1,
+            cnt: isDone ? 1 : 0,
+            status: row.status,
+          });
+        }
+      } else {
+        throw err;
+      }
     }
   }
 

@@ -514,11 +514,15 @@ export class CncMonitorService {
             if (totalSheets > 0 && completedSheets < totalSheets) {
               activeJobId = row.job_id;
               // Find the logical next incomplete layout from cnc_layouts where cnt < qta
-              const nextIncompleteRes = await this.db.query<{ layout_index: number }>(
-                `SELECT layout_index FROM cnc_layouts WHERE job_id = $1 AND cnt < qta ORDER BY layout_index ASC LIMIT 1`,
-                [row.job_id]
-              );
-              currentSheetIdx = nextIncompleteRes.rows[0]?.layout_index ?? row.current_layout_index ?? null;
+              try {
+                const nextIncompleteRes = await this.db.query<{ layout_index: number }>(
+                  `SELECT layout_index FROM cnc_layouts WHERE job_id = $1 AND cnt < qta ORDER BY layout_index ASC LIMIT 1`,
+                  [row.job_id]
+                );
+                currentSheetIdx = nextIncompleteRes.rows[0]?.layout_index ?? row.current_layout_index ?? null;
+              } catch (layoutErr: any) {
+                currentSheetIdx = row.current_layout_index ?? null;
+              }
             } else if (timeSinceLastFbtMs < 30 * 60 * 1000) {
               activeJobId = row.job_id;
               currentSheetIdx = row.current_layout_index ?? row.total_layouts ?? totalSheets;
