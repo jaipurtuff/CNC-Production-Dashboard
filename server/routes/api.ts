@@ -71,13 +71,71 @@ export function createApiRouter(
           const jobCusts = (j.customer_name || '').split(',').map(s => s.trim()).filter(Boolean);
           const distinctCusts = Array.from(new Set([...jobCusts, ...pieceCusts]));
 
+          // Query layout breakdown from cnc_layouts
+          const layoutsRes = await db.query<{
+            layout_index: number;
+            layout_code: string;
+            dim_x: number;
+            dim_y: number;
+            thickness_mm: number;
+            qta: number;
+            cnt: number;
+            status: string;
+          }>(
+            `SELECT layout_index, layout_code, dim_x, dim_y, thickness_mm, qta, cnt, status
+             FROM cnc_layouts
+             WHERE job_id = $1
+             ORDER BY layout_index ASC`,
+            [j.job_id]
+          );
+
+          const layouts = layoutsRes.rows;
+          const totalLayouts = layouts.length || (j as any).total_layouts || 0;
+          const totalPlannedSheets = layouts.length > 0
+            ? layouts.reduce((sum, l) => sum + Number(l.qta), 0)
+            : ((j as any).total_planned_sheets || j.total_programmed_sheets || 0);
+          const totalCutSheets = layouts.length > 0
+            ? layouts.reduce((sum, l) => sum + Number(l.cnt), 0)
+            : completedCount;
+          const totalPendingSheets = layouts.length > 0
+            ? layouts.reduce((sum, l) => sum + Math.max(0, Number(l.qta) - Number(l.cnt)), 0)
+            : Math.max(0, totalPlannedSheets - totalCutSheets);
+
+          // Find the logical next incomplete layout where Cnt < Qta
+          const nextIncompleteLayout = layouts.find(l => Number(l.cnt) < Number(l.qta));
+          const currentLayout = nextIncompleteLayout || (layouts.length > 0 ? layouts[layouts.length - 1] : null);
+          const currentLayoutIndex = currentLayout?.layout_index ?? monitor.current_sheet_index;
+
           activeJobDetails = {
             ...j,
             customer_name: distinctCusts.join(', ') || j.customer_name,
             customerNames: distinctCusts,
-            completedSheets: completedCount,
-            progressPct: j.total_programmed_sheets > 0
-              ? Math.round((completedCount / j.total_programmed_sheets) * 100)
+            total_layouts: totalLayouts,
+            total_planned_sheets: totalPlannedSheets,
+            total_cut_sheets: totalCutSheets,
+            total_pending_sheets: totalPendingSheets,
+            current_layout_index: currentLayoutIndex,
+            current_layout: currentLayout ? {
+              layoutIndex: currentLayout.layout_index,
+              layoutCode: currentLayout.layout_code,
+              qta: Number(currentLayout.qta),
+              cnt: Number(currentLayout.cnt),
+              dimX: Number(currentLayout.dim_x),
+              dimY: Number(currentLayout.dim_y),
+              thickness: Number(currentLayout.thickness_mm),
+              isCompleted: Number(currentLayout.cnt) >= Number(currentLayout.qta),
+            } : null,
+            layouts: layouts.map(l => ({
+              layoutIndex: l.layout_index,
+              layoutCode: l.layout_code,
+              qta: Number(l.qta),
+              cnt: Number(l.cnt),
+              isCompleted: Number(l.cnt) >= Number(l.qta),
+            })),
+            completedSheets: totalCutSheets,
+            total_programmed_sheets: totalPlannedSheets,
+            progressPct: totalPlannedSheets > 0
+              ? Math.round((totalCutSheets / totalPlannedSheets) * 100)
               : 0,
           };
         } else {

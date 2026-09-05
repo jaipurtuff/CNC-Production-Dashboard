@@ -55,19 +55,23 @@ export function parseFbt(content: string): ParsedFbt {
         const dimX = parseFloat(tokens[1]) || 0;
         const dimY = parseFloat(tokens[2]) || 0;
         const thickness = parseFloat(tokens[3]) || 0;
-        const quantityProgrammed = parseInt(tokens[4], 10) || 1;
+        const quantityProgrammed = parseInt(tokens[4], 10) || 0;
         const quantityCut = parseInt(tokens[5], 10) || 0;
         const progressState = tokens.length > 6 ? parseInt(tokens[6], 10) || 0 : 0;
         const completionFlag = tokens.length > 7 ? parseInt(tokens[7], 10) || 0 : 0;
         const materialCode = tokens.length > 8 ? tokens[8] : '';
 
-        // Confirmed condition: sheet is completed if cut quantity is at least programmed, OR completionFlag is 1
-        const isCompleted = quantityCut >= quantityProgrammed || completionFlag === 1;
+        // Confirmed logic:
+        // - Layout is complete when Cnt >= Qta
+        // - Layout is incomplete when Cnt < Qta
+        // Do not guess the meaning of fields after Cnt (0,1,F5)
+        const isCompleted = quantityCut >= quantityProgrammed;
 
         sheets.push({
           rawLine: line,
           sheetCode,
           sheetIndex,
+          layoutIndex: sheetIndex,
           dimX,
           dimY,
           thickness,
@@ -84,14 +88,23 @@ export function parseFbt(content: string): ParsedFbt {
     }
   }
 
-  const completedSheets = sheets.filter(s => s.isCompleted).length;
+  const totalLayouts = sheets.length;
+  const completedLayouts = sheets.filter(s => s.isCompleted).length;
+  const totalPlannedSheets = sheets.reduce((sum, s) => sum + s.quantityProgrammed, 0);
+  const totalCutSheets = sheets.reduce((sum, s) => sum + s.quantityCut, 0);
+  const pendingSheets = sheets.reduce((sum, s) => sum + Math.max(0, s.quantityProgrammed - s.quantityCut), 0);
 
   return {
     lastWrite,
     fields,
     sheets,
-    totalSheets: sheets.length,
-    completedSheets,
+    totalLayouts,
+    completedLayouts,
+    totalPlannedSheets,
+    totalCutSheets,
+    pendingSheets,
+    totalSheets: totalPlannedSheets,
+    completedSheets: totalCutSheets,
     unresolvedFields,
   };
 }

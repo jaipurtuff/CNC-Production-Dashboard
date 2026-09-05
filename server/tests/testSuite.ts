@@ -780,6 +780,176 @@ N40 ST50="18-08-2026-A-06MM CLEAR------.R01"
     await testDb.query(`DELETE FROM cnc_jobs WHERE job_id = 'TEST_RESTART_SURVIVAL_JOB'`);
   }
 
+  // --- Test 13: Confirmed FBT Layout State Monitoring & Incremental Transitions ---
+  const t13Start = Date.now();
+  const fbtTestJobId = 'TEST_FBT_LAYOUT_TRACKING_JOB';
+  try {
+    // Clean up any test state
+    await testDb.query(`DELETE FROM production_events WHERE job_id = $1`, [fbtTestJobId]);
+    await testDb.query(`DELETE FROM cnc_layouts WHERE job_id = $1`, [fbtTestJobId]);
+    await testDb.query(`DELETE FROM cnc_mother_sheets WHERE job_id = $1`, [fbtTestJobId]);
+    await testDb.query(`DELETE FROM cnc_pieces WHERE job_id = $1`, [fbtTestJobId]);
+    await testDb.query(`DELETE FROM cnc_jobs WHERE job_id = $1`, [fbtTestJobId]);
+
+    // Step A: Initial state
+    // Layout 6: Qta=6, Cnt=5 (5 cut, 1 pending)
+    // Layout 21: Qta=1, Cnt=0 (0 cut, 1 pending)
+    // Layout 24: Qta=2, Cnt=0 (0 cut, 2 pending)
+    // Total planned = 6 + 1 + 2 = 9 sheets.
+    // Total cut = 5 sheets.
+    const initialJob: any = {
+      jobId: fbtTestJobId,
+      baseFilename: fbtTestJobId,
+      totalProgrammedSheets: 9,
+      completedSheetsCount: 5,
+      sheetWidthMm: 3660,
+      sheetHeightMm: 2440,
+      sheetThicknessMm: 5,
+      materialCode: '05MM_CLEAR',
+      customerName: 'Premium Glass',
+      orderNo: 'WO-FBT-101',
+      effectiveCuttingDate: '2026-09-04',
+      sheets: [
+        {
+          sheetCode: `${fbtTestJobId}-----6`,
+          sheetIndex: 6,
+          layoutIndex: 6,
+          dimX: 3660,
+          dimY: 2440,
+          thickness: 5,
+          quantityProgrammed: 6,
+          quantityCut: 5,
+          isCompleted: false,
+          rawLine: `${fbtTestJobId}-----6,3660,2440,5,6,5,5,6,F5`,
+        },
+        {
+          sheetCode: `${fbtTestJobId}-----21`,
+          sheetIndex: 21,
+          layoutIndex: 21,
+          dimX: 3660,
+          dimY: 2440,
+          thickness: 5,
+          quantityProgrammed: 1,
+          quantityCut: 0,
+          isCompleted: false,
+          rawLine: `${fbtTestJobId}-----21,3660,2440,5,1,0,20,21,F5`,
+        },
+        {
+          sheetCode: `${fbtTestJobId}-----24`,
+          sheetIndex: 24,
+          layoutIndex: 24,
+          dimX: 3660,
+          dimY: 2440,
+          thickness: 5,
+          quantityProgrammed: 2,
+          quantityCut: 0,
+          isCompleted: false,
+          rawLine: `${fbtTestJobId}-----24,3660,2440,5,2,0,23,24,F5`,
+        },
+      ],
+      pieces: [{ orderNo: 'WO-FBT-101', areaSqm: 1.5, customer: 'Premium Glass' }],
+    };
+
+    // First scan/import: 5 historical sheets already cut
+    const resA = await processJobStateTransition(testDb, initialJob, new Date('2026-09-04T10:00:00Z'), '2026-09-04');
+    if (resA.newEventsCreated !== 5) {
+      throw new Error(`Expected 5 initial completed events, got ${resA.newEventsCreated}`);
+    }
+    // Active layout should be Layout #6 (since Cnt=5 < Qta=6)
+    if (resA.currentLayoutIndex !== 6) {
+      throw new Error(`Expected active layout to be #6, got ${resA.currentLayoutIndex}`);
+    }
+
+    // Step B: Multi-sheet layout increment: Layout 6 finishes (Cnt changes from 5 to 6)
+    // ONLY ONE raw sheet was cut, NOT six!
+    const jobStepB = JSON.parse(JSON.stringify(initialJob));
+    jobStepB.sheets[0].quantityCut = 6;
+    jobStepB.sheets[0].isCompleted = true;
+    jobStepB.sheets[0].rawLine = `${fbtTestJobId}-----6,3660,2440,5,6,6,5,6,F5`;
+
+    const resB = await processJobStateTransition(testDb, jobStepB, new Date('2026-09-04T10:15:00Z'), '2026-09-04');
+    if (resB.newEventsCreated !== 1) {
+      throw new Error(`Multi-sheet layout increment must create exactly 1 new event (newCnt 6 - prevCnt 5), got ${resB.newEventsCreated}`);
+    }
+    // Now Layout 6 is complete (6/6). Active layout should advance to #21 (Cnt 0 < Qta 1)
+    if (resB.currentLayoutIndex !== 21) {
+      throw new Error(`Expected active layout to advance to #21, got ${resB.currentLayoutIndex}`);
+    }
+
+    // Step C: Subsequent scan with Cnt=6 unchanged must generate ZERO new events
+    const resC = await processJobStateTransition(testDb, jobStepB, new Date('2026-09-04T10:20:00Z'), '2026-09-04');
+    if (resC.newEventsCreated !== 0) {
+      throw new Error(`Unchanged Cnt=6 must generate 0 new events, got ${resC.newEventsCreated}`);
+    }
+
+    // Step D: Incremental cut on Layout 24: Qta=2, Cnt=0 -> Cnt=1 (First increment)
+    const jobStepD = JSON.parse(JSON.stringify(jobStepB));
+    jobStepD.sheets[2].quantityCut = 1;
+    jobStepD.sheets[2].rawLine = `${fbtTestJobId}-----24,3660,2440,5,2,1,23,24,F5`;
+
+    const resD = await processJobStateTransition(testDb, jobStepD, new Date('2026-09-04T10:30:00Z'), '2026-09-04');
+    if (resD.newEventsCreated !== 1) {
+      throw new Error(`First increment on Layout 24 must create 1 event, got ${resD.newEventsCreated}`);
+    }
+
+    // Step E: Second increment on Layout 24: Qta=2, Cnt=1 -> Cnt=2 (Second increment)
+    const jobStepE = JSON.parse(JSON.stringify(jobStepD));
+    jobStepE.sheets[2].quantityCut = 2;
+    jobStepE.sheets[2].isCompleted = true;
+    jobStepE.sheets[2].rawLine = `${fbtTestJobId}-----24,3660,2440,5,2,2,23,24,F5`;
+
+    const resE = await processJobStateTransition(testDb, jobStepE, new Date('2026-09-04T10:45:00Z'), '2026-09-04');
+    if (resE.newEventsCreated !== 1) {
+      throw new Error(`Second increment on Layout 24 must create 1 event, got ${resE.newEventsCreated}`);
+    }
+
+    // Total events created for this job so far: 5 (initial) + 1 (Step B) + 1 (Step D) + 1 (Step E) = 8
+    const totalEventsInDb = await testDb.query<{ count: string }>(
+      'SELECT COUNT(*) as count FROM production_events WHERE job_id = $1',
+      [fbtTestJobId]
+    );
+    if (parseInt(totalEventsInDb.rows[0]?.count || '0', 10) !== 8) {
+      throw new Error(`Expected 8 total events in DB, got ${totalEventsInDb.rows[0]?.count}`);
+    }
+
+    // Verify layout states in cnc_layouts table
+    const layoutRows = await testDb.query<{ layout_index: number; qta: number; cnt: number; status: string }>(
+      'SELECT layout_index, qta, cnt, status FROM cnc_layouts WHERE job_id = $1 ORDER BY layout_index ASC',
+      [fbtTestJobId]
+    );
+    if (layoutRows.rows.length !== 3) {
+      throw new Error(`Expected 3 rows in cnc_layouts, got ${layoutRows.rows.length}`);
+    }
+    const l6 = layoutRows.rows.find(r => r.layout_index === 6);
+    const l24 = layoutRows.rows.find(r => r.layout_index === 24);
+    if (!l6 || l6.cnt !== 6 || l6.status !== 'COMPLETED') {
+      throw new Error(`Layout 6 state invalid: ${JSON.stringify(l6)}`);
+    }
+    if (!l24 || l24.cnt !== 2 || l24.status !== 'COMPLETED') {
+      throw new Error(`Layout 24 state invalid: ${JSON.stringify(l24)}`);
+    }
+
+    results.push({
+      testName: 'Confirmed FBT Layout Monitoring: Multi-Sheet & Incremental Cuts',
+      passed: true,
+      durationMs: Date.now() - t13Start,
+      message: 'PASSED: Verified exact FBT layout logic: Cnt increases trigger exactly newCnt-prevCnt events, multi-sheet layouts do not overcount, active layout reflects Cnt < Qta, and states persist in PostgreSQL.',
+    });
+  } catch (err: any) {
+    results.push({
+      testName: 'Confirmed FBT Layout Monitoring: Multi-Sheet & Incremental Cuts',
+      passed: false,
+      durationMs: Date.now() - t13Start,
+      message: err.message,
+    });
+  } finally {
+    await testDb.query(`DELETE FROM production_events WHERE job_id = $1`, [fbtTestJobId]);
+    await testDb.query(`DELETE FROM cnc_layouts WHERE job_id = $1`, [fbtTestJobId]);
+    await testDb.query(`DELETE FROM cnc_mother_sheets WHERE job_id = $1`, [fbtTestJobId]);
+    await testDb.query(`DELETE FROM cnc_pieces WHERE job_id = $1`, [fbtTestJobId]);
+    await testDb.query(`DELETE FROM cnc_jobs WHERE job_id = $1`, [fbtTestJobId]);
+  }
+
   const passedCount = results.filter(r => r.passed).length;
   const failedCount = results.length - passedCount;
 

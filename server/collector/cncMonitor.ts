@@ -422,11 +422,11 @@ export class CncMonitorService {
         if (newestJob.completedSheetsCount < newestJob.totalProgrammedSheets) {
           // Machine is currently running or paused on this job
           activeJobId = newestJob.jobId;
-          currentSheetIdx = newestJob.currentSheetIndex ?? (newestJob.completedSheetsCount + 1);
+          currentSheetIdx = newestJob.currentLayoutIndex ?? newestJob.currentSheetIndex ?? null;
         } else if (timeSinceLastFbtMs < 30 * 60 * 1000) {
           // Recently finished within the last 30 minutes
           activeJobId = newestJob.jobId;
-          currentSheetIdx = newestJob.totalProgrammedSheets;
+          currentSheetIdx = newestJob.currentLayoutIndex ?? (newestJob.totalLayouts || newestJob.totalProgrammedSheets);
         } else {
           // Machine is idle (no unfinished active job and no recent cutting activity)
           activeJobId = null;
@@ -438,11 +438,13 @@ export class CncMonitorService {
           const latestDbJobRes = await this.db.query<{
             job_id: string;
             total_programmed_sheets: number;
+            total_layouts: number;
+            current_layout_index: number | null;
             status: string;
             file_mtime: string | Date;
             completed_count: string | number;
           }>(
-            `SELECT j.job_id, j.total_programmed_sheets, j.status, f.file_mtime,
+            `SELECT j.job_id, j.total_programmed_sheets, j.total_layouts, j.current_layout_index, j.status, f.file_mtime,
                     COALESCE(
                       (SELECT COUNT(DISTINCT sheet_index)
                        FROM production_events pe
@@ -466,10 +468,15 @@ export class CncMonitorService {
 
             if (totalSheets > 0 && completedSheets < totalSheets) {
               activeJobId = row.job_id;
-              currentSheetIdx = completedSheets + 1;
+              // Find the logical next incomplete layout from cnc_layouts where cnt < qta
+              const nextIncompleteRes = await this.db.query<{ layout_index: number }>(
+                `SELECT layout_index FROM cnc_layouts WHERE job_id = $1 AND cnt < qta ORDER BY layout_index ASC LIMIT 1`,
+                [row.job_id]
+              );
+              currentSheetIdx = nextIncompleteRes.rows[0]?.layout_index ?? row.current_layout_index ?? null;
             } else if (timeSinceLastFbtMs < 30 * 60 * 1000) {
               activeJobId = row.job_id;
-              currentSheetIdx = totalSheets;
+              currentSheetIdx = row.current_layout_index ?? row.total_layouts ?? totalSheets;
             } else {
               activeJobId = null;
               currentSheetIdx = null;

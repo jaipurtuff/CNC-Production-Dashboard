@@ -8,25 +8,31 @@ export interface FbtFieldDefinition {
 
 export interface FbtSheetRecord {
   rawLine: string;
-  sheetCode: string;
-  sheetIndex: number;
-  dimX: number; // Width mm (CONFIRMED)
-  dimY: number; // Height mm (CONFIRMED)
+  sheetCode: string; // Cod = Layout Serial Number (CONFIRMED)
+  sheetIndex: number; // Layout serial number / index (1..N)
+  layoutIndex: number; // 1-based layout index
+  dimX: number; // Width mm (DimX) (CONFIRMED)
+  dimY: number; // Height mm (DimY) (CONFIRMED)
   thickness: number; // Spes mm (CONFIRMED)
-  quantityProgrammed: number; // Qta (CONFIRMED)
-  quantityCut: number; // Cnt (CONFIRMED)
-  progressState: number; // Column 6 (INFERRED: progress counter or sheet index)
-  completionFlag: number; // Column 7 (INFERRED: 1 = completed, 0 = pending)
-  materialCode: string; // Column 8 (CONFIRMED: e.g. F6)
-  isCompleted: boolean; // Evaluated: (quantityCut >= quantityProgrammed) || completionFlag === 1
+  quantityProgrammed: number; // Qta = Total raw sheets required for this layout (CONFIRMED)
+  quantityCut: number; // Cnt = Actual raw sheets already cut by CNC for this layout (CONFIRMED)
+  progressState: number; // Column 6 (Unconfirmed)
+  completionFlag: number; // Column 7 (Unconfirmed)
+  materialCode: string; // Column 8 (e.g. F5, F6)
+  isCompleted: boolean; // Evaluated strictly as quantityCut >= quantityProgrammed (Cnt >= Qta)
 }
 
 export interface ParsedFbt {
-  lastWrite: string | null; // e.g. "01-09-2026 16:27:07" (CONFIRMED header)
+  lastWrite: string | null; // e.g. "04-09-2026 16:56:03" (CONFIRMED header)
   fields: FbtFieldDefinition[];
-  sheets: FbtSheetRecord[];
-  totalSheets: number;
-  completedSheets: number;
+  sheets: FbtSheetRecord[]; // Layout records
+  totalLayouts: number; // Count of distinct layouts (e.g. 44)
+  completedLayouts: number; // Count of layouts with Cnt >= Qta
+  totalPlannedSheets: number; // SUM(Qta) across all layouts (e.g. 66)
+  totalCutSheets: number; // SUM(Cnt) across all layouts (e.g. 26)
+  pendingSheets: number; // SUM(Math.max(0, Qta - Cnt)) across all layouts (e.g. 40)
+  totalSheets: number; // Alias to totalPlannedSheets (SUM(Qta))
+  completedSheets: number; // Alias to totalCutSheets (SUM(Cnt))
   unresolvedFields: Record<string, string>;
 }
 
@@ -89,8 +95,14 @@ export interface CorrelatedCncJob {
     z01?: { path: string; mtime: Date; size: number; parsed: ParsedZ01 };
   };
   // Authoritative cross-file correlated properties:
-  totalProgrammedSheets: number;
-  completedSheetsCount: number;
+  totalProgrammedSheets: number; // SUM(Qta) = Planned raw sheets
+  completedSheetsCount: number; // SUM(Cnt) = Actual raw sheets cut
+  totalLayouts?: number; // Total distinct layouts (e.g. 44)
+  completedLayoutsCount?: number; // Layouts where Cnt >= Qta
+  currentLayoutIndex?: number | null; // First layout where Cnt < Qta
+  totalPlannedSheets?: number; // Alias to totalProgrammedSheets
+  totalCutSheets?: number; // Alias to completedSheetsCount
+  totalPendingSheets?: number; // SUM(Math.max(0, Qta - Cnt))
   sheetWidthMm: number;
   sheetHeightMm: number;
   sheetThicknessMm: number;

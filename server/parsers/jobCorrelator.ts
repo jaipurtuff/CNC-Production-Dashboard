@@ -128,9 +128,14 @@ export function correlateJobFiles(baseName: string, files: DiscoveredFile[]): Co
   const customerName = customerNames.join(', ') || undefined;
   const orderNo = orderNos.join(', ') || undefined;
 
-  const totalProgrammedSheets = parsedFbt?.totalSheets || 0;
-  const completedSheetsCount = parsedFbt?.completedSheets || 0;
-  const isComplete = totalProgrammedSheets > 0 && completedSheetsCount >= totalProgrammedSheets;
+  const totalProgrammedSheets = parsedFbt?.totalPlannedSheets ?? parsedFbt?.totalSheets ?? 0;
+  const completedSheetsCount = parsedFbt?.totalCutSheets ?? parsedFbt?.completedSheets ?? 0;
+  const totalLayouts = parsedFbt?.totalLayouts ?? parsedFbt?.sheets.length ?? 0;
+  const completedLayoutsCount = parsedFbt?.completedLayouts ?? 0;
+  const totalPlannedSheets = totalProgrammedSheets;
+  const totalCutSheets = completedSheetsCount;
+  const totalPendingSheets = parsedFbt?.pendingSheets ?? Math.max(0, totalPlannedSheets - totalCutSheets);
+  const isComplete = totalPlannedSheets > 0 && totalCutSheets >= totalPlannedSheets;
 
   // Authoritative Historical Production / Cutting Date (Issue 5)
   // Determine date from actual file metadata (FBT [LAST_WRITE], OTD Date, or FBT file mtime)
@@ -147,16 +152,21 @@ export function correlateJobFiles(baseName: string, files: DiscoveredFile[]): Co
   }
   const effectiveCuttingDateStr = effectiveCuttingDate.toISOString().split('T')[0];
 
-  // Current Sheet Index (Issue 4)
-  let currentSheetIndex: number | null = null;
+  // Current Active Layout (Issue 4 & Confirmed FBT logic):
+  // The logical next incomplete layout is the first layout where Cnt < Qta.
+  // Do not use filename date to determine current layout.
+  // Do not use newest database row to determine current layout.
+  let currentLayoutIndex: number | null = null;
   if (parsedFbt && parsedFbt.sheets.length > 0) {
-    const nextPending = parsedFbt.sheets.find(s => !s.isCompleted);
-    if (nextPending) {
-      currentSheetIndex = nextPending.sheetIndex;
-    } else if (parsedFbt.completedSheets >= parsedFbt.totalSheets && parsedFbt.totalSheets > 0) {
-      currentSheetIndex = parsedFbt.totalSheets;
+    const nextIncompleteLayout = parsedFbt.sheets.find(s => s.quantityCut < s.quantityProgrammed);
+    if (nextIncompleteLayout) {
+      currentLayoutIndex = nextIncompleteLayout.layoutIndex;
+    } else if (isComplete && totalLayouts > 0) {
+      // If entire job is cut, reference the last layout
+      currentLayoutIndex = parsedFbt.sheets[parsedFbt.sheets.length - 1].layoutIndex;
     }
   }
+  const currentSheetIndex = currentLayoutIndex;
 
   return {
     jobId: baseName,
@@ -164,6 +174,12 @@ export function correlateJobFiles(baseName: string, files: DiscoveredFile[]): Co
     files: jobFiles,
     totalProgrammedSheets,
     completedSheetsCount,
+    totalLayouts,
+    completedLayoutsCount,
+    currentLayoutIndex,
+    totalPlannedSheets,
+    totalCutSheets,
+    totalPendingSheets,
     sheetWidthMm,
     sheetHeightMm,
     sheetThicknessMm,

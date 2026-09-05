@@ -11,6 +11,28 @@ export interface CncStatus {
     job_id: string;
     base_filename: string;
     total_programmed_sheets: number;
+    total_layouts?: number;
+    total_planned_sheets?: number;
+    total_cut_sheets?: number;
+    total_pending_sheets?: number;
+    current_layout_index?: number | null;
+    current_layout?: {
+      layoutIndex: number;
+      layoutCode: string;
+      qta: number;
+      cnt: number;
+      dimX: number;
+      dimY: number;
+      thickness: number;
+      isCompleted: boolean;
+    } | null;
+    layouts?: {
+      layoutIndex: number;
+      layoutCode: string;
+      qta: number;
+      cnt: number;
+      isCompleted: boolean;
+    }[];
     sheet_width_mm: string;
     sheet_height_mm: string;
     sheet_thickness_mm: string;

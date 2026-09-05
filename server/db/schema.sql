@@ -8,6 +8,11 @@ CREATE TABLE IF NOT EXISTS cnc_jobs (
   base_filename TEXT NOT NULL,
   file_base_name TEXT,                          -- Compatibility alias column
   total_programmed_sheets INTEGER NOT NULL DEFAULT 0,
+  total_layouts INTEGER NOT NULL DEFAULT 0,
+  total_planned_sheets INTEGER NOT NULL DEFAULT 0,
+  total_cut_sheets INTEGER NOT NULL DEFAULT 0,
+  total_pending_sheets INTEGER NOT NULL DEFAULT 0,
+  current_layout_index INTEGER,
   sheet_width_mm NUMERIC(10, 2) NOT NULL DEFAULT 0,
   sheet_height_mm NUMERIC(10, 2) NOT NULL DEFAULT 0,
   sheet_thickness_mm NUMERIC(10, 2) NOT NULL DEFAULT 0,
@@ -48,17 +53,39 @@ CREATE TABLE IF NOT EXISTS cnc_job_files (
 CREATE TABLE IF NOT EXISTS cnc_mother_sheets (
   id SERIAL PRIMARY KEY,
   job_id TEXT NOT NULL REFERENCES cnc_jobs(job_id) ON DELETE CASCADE,
-  sheet_index INTEGER NOT NULL,                 -- 1-based sheet index
+  sheet_index INTEGER NOT NULL,                 -- 1-based sheet index / layout index
+  layout_index INTEGER,
   sheet_code TEXT,
   width_mm NUMERIC(10, 2) NOT NULL,
   height_mm NUMERIC(10, 2) NOT NULL,
   thickness_mm NUMERIC(10, 2) NOT NULL,
   area_sqm NUMERIC(10, 4) NOT NULL,
   programmed_pieces INTEGER NOT NULL DEFAULT 0,
+  qta INTEGER NOT NULL DEFAULT 1,
+  cnt INTEGER NOT NULL DEFAULT 0,
   fbt_record_raw TEXT,
-  status TEXT NOT NULL DEFAULT 'PENDING',       -- PENDING, COMPLETED
+  status TEXT NOT NULL DEFAULT 'PENDING',       -- PENDING, IN_PROGRESS, COMPLETED
+  is_completed BOOLEAN NOT NULL DEFAULT FALSE,
   completed_at TIMESTAMPTZ,
   UNIQUE(job_id, sheet_index)
+);
+
+-- CONFIRMED FBT LAYOUTS (1 row per layout, e.g. 1..44)
+CREATE TABLE IF NOT EXISTS cnc_layouts (
+  id SERIAL PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES cnc_jobs(job_id) ON DELETE CASCADE,
+  layout_index INTEGER NOT NULL,                 -- 1-based layout index (1..44)
+  layout_code TEXT NOT NULL,                     -- Cod (e.g. 04-09-2026-B-05MM_CLEAR-----21)
+  dim_x NUMERIC(10, 2) NOT NULL,                 -- DimX raw sheet length mm
+  dim_y NUMERIC(10, 2) NOT NULL,                 -- DimY raw sheet width mm
+  thickness_mm NUMERIC(10, 2) NOT NULL,          -- Spes glass thickness mm
+  area_sqm NUMERIC(10, 4) NOT NULL,              -- (dim_x/1000)*(dim_y/1000)
+  qta INTEGER NOT NULL DEFAULT 1,                -- Qta = Total raw sheets required for this layout
+  cnt INTEGER NOT NULL DEFAULT 0,                -- Cnt = Actual raw sheets cut for this layout
+  raw_line TEXT,
+  status TEXT NOT NULL DEFAULT 'PENDING',        -- PENDING, IN_PROGRESS, COMPLETED
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(job_id, layout_index)
 );
 
 CREATE TABLE IF NOT EXISTS cnc_pieces (
@@ -88,6 +115,8 @@ CREATE TABLE IF NOT EXISTS production_events (
   production_date DATE NOT NULL,                -- YYYY-MM-DD grouping date
   pieces_count INTEGER NOT NULL DEFAULT 0,
   area_sqm NUMERIC(10, 4) NOT NULL DEFAULT 0,
+  layout_index INTEGER,
+  layout_cut_index INTEGER,
   fbt_raw_line TEXT,
   fbt_last_write TEXT,
   file_mtime TIMESTAMPTZ,
@@ -162,3 +191,4 @@ CREATE INDEX IF NOT EXISTS idx_prod_events_job ON production_events(job_id);
 CREATE INDEX IF NOT EXISTS idx_cnc_pieces_order ON cnc_pieces(order_no);
 CREATE INDEX IF NOT EXISTS idx_cnc_pieces_job ON cnc_pieces(job_id, sheet_index);
 CREATE INDEX IF NOT EXISTS idx_mother_sheets_job ON cnc_mother_sheets(job_id);
+CREATE INDEX IF NOT EXISTS idx_cnc_layouts_job ON cnc_layouts(job_id);
