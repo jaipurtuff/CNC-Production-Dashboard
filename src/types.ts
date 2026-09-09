@@ -1,12 +1,24 @@
 export interface CncStatus {
   isOnline: boolean;
+  collectorState?: 'LIVE' | 'STALE' | 'OFFLINE' | 'ERROR';
   sharePath: string;
   lastReachableAt: string | null;
   lastScanAt: string | null;
+  lastProductionEventAt?: string | null;
   activeJobId: string | null;
   currentSheetIndex: number | null;
   totalJobsTracked: number;
   errorMessage: string | null;
+  lastProductionEvent?: {
+    eventId: number;
+    jobId: string;
+    sheetIndex: number;
+    productionDate: string;
+    eventTimestamp: string;
+    piecesCount: number;
+    areaSqm: number;
+    productionSqmMm: number;
+  } | null;
   activeJob: {
     job_id: string;
     base_filename: string;
@@ -16,6 +28,9 @@ export interface CncStatus {
     total_cut_sheets?: number;
     total_pending_sheets?: number;
     current_layout_index?: number | null;
+    productionSqmMmPlanned?: number;
+    productionSqmMmCut?: number;
+    productionSqmMmPending?: number;
     current_layout?: {
       layoutIndex: number;
       layoutCode: string;
@@ -24,6 +39,7 @@ export interface CncStatus {
       dimX: number;
       dimY: number;
       thickness: number;
+      productionSqmMm?: number;
       isCompleted: boolean;
     } | null;
     layouts?: {
@@ -31,6 +47,11 @@ export interface CncStatus {
       layoutCode: string;
       qta: number;
       cnt: number;
+      dimX?: number;
+      dimY?: number;
+      thickness?: number;
+      productionSqmMmCut?: number;
+      productionSqmMmPlanned?: number;
       isCompleted: boolean;
     }[];
     sheet_width_mm: string;
@@ -66,15 +87,18 @@ export interface DailyProductionSummary {
   totalMotherSheetsCut: number;
   totalPiecesCut: number;
   totalAreaSqm: number;
+  totalProductionSqmMm?: number;
   activeJobsCount: number;
   jobBreakdown: {
     jobId: string;
     customerName: string | null;
+    customerNames?: string[];
     orderNo: string | null;
     materialCode: string;
     sheetsCutToday: number;
     piecesCutToday: number;
     areaSqmToday: number;
+    productionSqmMmToday?: number;
     totalProgrammedSheets: number;
     lifetimeCompletedSheets: number;
   }[];
@@ -84,8 +108,111 @@ export interface DailyProductionSummary {
     sheetIndex: number;
     piecesCount: number;
     areaSqm: number;
+    productionSqmMm?: number;
     eventTimestamp: string;
     confidence: string;
+    fbtLastWrite: string | null;
+  }[];
+}
+
+export interface CncFileCardItem {
+  jobId: string;
+  baseFilename: string;
+  material: string;
+  materialCode: string;
+  thicknessMm: number;
+  widthMm: number;
+  heightMm: number;
+  totalLayouts: number;
+  totalPlannedSheets: number;
+  totalCutSheets: number;
+  totalPendingSheets: number;
+  currentLayoutIndex: number;
+  progressPct: number;
+  productionSqmMmPlanned: number;
+  productionSqmMmCut: number;
+  productionSqmMmPending: number;
+  status: 'CUTTING' | 'COMPLETED' | 'PAUSED' | 'PENDING';
+  isCurrentlyActive: boolean;
+  customersCount: number;
+  customerNames: string[];
+  workOrdersCount: number;
+  workOrderNos: string[];
+  plannedWastePct: number | null;
+  filenameDate: string | null;
+  otdDate: string | null;
+  fbtLastWrite: string | null;
+  fbtFileMtime: string | null;
+  lastSeenAt: string;
+  sourceFiles: {
+    fbt: boolean;
+    otd: boolean;
+    cni: boolean;
+    z01: boolean;
+  };
+}
+
+export interface CncFileDetails {
+  job: CncFileCardItem & {
+    sheet_width_mm?: string;
+    sheet_height_mm?: string;
+    sheet_thickness_mm?: string;
+  };
+  layouts: {
+    layoutIndex: number;
+    layoutCode: string;
+    dimX: number;
+    dimY: number;
+    thicknessMm: number;
+    qta: number;
+    cnt: number;
+    pending: number;
+    status: string;
+    productionSqmMm: number;
+    productionSqmMmPlanned: number;
+  }[];
+  pieces: {
+    id: number;
+    sheet_index: number;
+    piece_id: string | null;
+    order_no: string | null;
+    wo_no: string | null;
+    pos_no: string | null;
+    customer_name: string | null;
+    width_mm: number;
+    height_mm: number;
+    area_sqm: number;
+    status: string;
+    completed_at: string | null;
+  }[];
+  sourceFiles: {
+    file_type: string;
+    filename: string;
+    file_path: string;
+    file_size_bytes: number;
+    file_mtime: string;
+    content_sha256: string;
+  }[];
+  customers: {
+    customerName: string;
+    piecesCount: number;
+    areaSqm: number;
+    productionSqmMm: number;
+  }[];
+  workOrders: {
+    workOrderNo: string;
+    customerName: string | null;
+    piecesCount: number;
+    areaSqm: number;
+  }[];
+  timeline: {
+    eventId: number;
+    sheetIndex: number;
+    eventTimestamp: string;
+    productionDate: string;
+    piecesCount: number;
+    areaSqm: number;
+    productionSqmMm: number;
     fbtLastWrite: string | null;
   }[];
 }

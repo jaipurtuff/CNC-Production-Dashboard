@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS cnc_jobs (
   sheet_width_mm NUMERIC(10, 2) NOT NULL DEFAULT 0,
   sheet_height_mm NUMERIC(10, 2) NOT NULL DEFAULT 0,
   sheet_thickness_mm NUMERIC(10, 2) NOT NULL DEFAULT 0,
+  total_planned_sqm_mm NUMERIC(14, 4) NOT NULL DEFAULT 0,
+  total_cut_sqm_mm NUMERIC(14, 4) NOT NULL DEFAULT 0,
   material_code TEXT,
   material TEXT,
   customer_name TEXT,
@@ -61,6 +63,7 @@ CREATE TABLE IF NOT EXISTS cnc_mother_sheets (
   height_mm NUMERIC(10, 2) NOT NULL,
   thickness_mm NUMERIC(10, 2) NOT NULL,
   area_sqm NUMERIC(10, 4) NOT NULL,
+  production_sqm_mm NUMERIC(14, 4) NOT NULL DEFAULT 0,
   programmed_pieces INTEGER NOT NULL DEFAULT 0,
   qta INTEGER NOT NULL DEFAULT 1,
   cnt INTEGER NOT NULL DEFAULT 0,
@@ -81,6 +84,7 @@ CREATE TABLE IF NOT EXISTS cnc_layouts (
   dim_y NUMERIC(10, 2) NOT NULL,                 -- DimY raw sheet width mm
   thickness_mm NUMERIC(10, 2) NOT NULL,          -- Spes glass thickness mm
   area_sqm NUMERIC(10, 4) NOT NULL,              -- (dim_x/1000)*(dim_y/1000)
+  production_sqm_mm NUMERIC(14, 4) NOT NULL DEFAULT 0, -- area_sqm * thickness_mm
   qta INTEGER NOT NULL DEFAULT 1,                -- Qta = Total raw sheets required for this layout
   cnt INTEGER NOT NULL DEFAULT 0,                -- Cnt = Actual raw sheets cut for this layout
   raw_line TEXT,
@@ -116,6 +120,7 @@ CREATE TABLE IF NOT EXISTS production_events (
   production_date DATE NOT NULL,                -- YYYY-MM-DD grouping date
   pieces_count INTEGER NOT NULL DEFAULT 0,
   area_sqm NUMERIC(10, 4) NOT NULL DEFAULT 0,
+  production_sqm_mm NUMERIC(14, 4) NOT NULL DEFAULT 0,
   layout_index INTEGER,
   layout_cut_index INTEGER,
   fbt_raw_line TEXT,
@@ -177,9 +182,11 @@ CREATE TABLE IF NOT EXISTS system_events (
 CREATE TABLE IF NOT EXISTS cnc_monitor_state (
   id INTEGER PRIMARY KEY DEFAULT 1,
   is_online BOOLEAN NOT NULL DEFAULT FALSE,
+  collector_state TEXT NOT NULL DEFAULT 'LIVE',  -- LIVE, STALE, OFFLINE, ERROR
   share_path TEXT NOT NULL,
   last_reachable_at TIMESTAMPTZ,
   last_scan_at TIMESTAMPTZ,
+  last_production_event_at TIMESTAMPTZ,
   active_job_id TEXT,
   current_sheet_index INTEGER,
   total_jobs_tracked INTEGER NOT NULL DEFAULT 0,

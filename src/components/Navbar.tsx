@@ -53,7 +53,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
               <HardDrive className="w-3.5 h-3.5" />
-              <span>{isOnline ? 'CNC ONLINE' : 'CNC OFFLINE'}</span>
+              <span>{isOnline ? (cncStatus?.collectorState || 'CNC ONLINE') : 'CNC OFFLINE'}</span>
               <span className="text-slate-500">|</span>
               <span className="text-[11px] text-slate-400">
                 {cncStatus?.totalJobsTracked || 0} jobs watched
@@ -87,7 +87,19 @@ export const Navbar: React.FC<NavbarProps> = ({
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
-            <span>Live Production</span>
+            <span>Live Monitor</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('files')}
+            className={`px-3.5 py-2 text-xs font-medium rounded-t-md transition-colors border-b-2 flex items-center space-x-2 whitespace-nowrap ${
+              activeTab === 'files'
+                ? 'border-indigo-500 text-indigo-300 bg-indigo-950/30'
+                : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <FileCode className="w-3.5 h-3.5" />
+            <span>CNC Programs &amp; Files</span>
           </button>
 
           <button
@@ -123,7 +135,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             }`}
           >
             <FileCode className="w-3.5 h-3.5" />
-            <span>CNC File Inspector (.FBT, .OTD, .CNI, .z01)</span>
+            <span>Raw File Inspector</span>
           </button>
 
           <button
@@ -135,7 +147,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             }`}
           >
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Verification Testbench (8 Tests)</span>
+            <span>Verification Testbench (14 Tests)</span>
           </button>
         </div>
       </div>

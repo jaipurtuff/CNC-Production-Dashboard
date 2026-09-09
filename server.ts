@@ -44,18 +44,15 @@ async function startServer() {
     next(err);
   });
 
-  // Check if running in production mode (dist bundle exists or NODE_ENV=production)
-  const distPath = path.join(process.cwd(), 'dist');
-  const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
-  const isProduction = process.env.NODE_ENV === 'production' || hasDist;
-
-  if (!isProduction) {
+  // Vite middleware setup
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
+    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

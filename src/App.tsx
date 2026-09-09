@@ -1,18 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
-import { MetricsCards } from './components/MetricsCards';
-import { ActiveJobBanner } from './components/ActiveJobBanner';
-import { DailyTimeline } from './components/DailyTimeline';
+import { HomeDashboard } from './components/HomeDashboard';
+import { CncFilesView } from './components/CncFilesView';
 import { WorkOrdersTable } from './components/WorkOrdersTable';
 import { TraceabilityView } from './components/TraceabilityView';
 import { CncFileInspector } from './components/CncFileInspector';
 import { VerificationTestBench } from './components/VerificationTestBench';
 import { JobTimelineModal } from './components/JobTimelineModal';
-import { CncStatus, OrderSyncStatus, DailyProductionSummary, CncJobItem, WorkOrderItem } from './types';
+import { CncStatus, OrderSyncStatus, DailyProductionSummary } from './types';
 import { safeFetchJson } from './lib/api';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'production' | 'orders' | 'traceability' | 'inspector' | 'tests'>('production');
+  const [activeTab, setActiveTab] = useState<'production' | 'files' | 'orders' | 'traceability' | 'inspector' | 'tests'>('production');
   const [selectedDate, setSelectedDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [isPolling, setIsPolling] = useState<boolean>(false);
@@ -84,53 +83,48 @@ export default function App() {
 
       {/* Main Workspace */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Tab 1: Live Production & Daily Events (Lightweight, aggregated) */}
+        {/* Tab 1: Clean Redesigned Operational Home Dashboard */}
         {activeTab === 'production' && (
-          <div className="space-y-6">
-            {/* Active Cutting Table Banner */}
-            <ActiveJobBanner
-              status={cncStatus}
-              onSelectJob={handleInspectJob}
-            />
-
-            {/* Daily High-Contrast Industrial Metrics (Aggregated by PostgreSQL) */}
-            <MetricsCards
-              summary={dailySummary}
-              selectedDate={selectedDate}
-            />
-
-            {/* Daily History & Immutable Production Events */}
-            <DailyTimeline
-              summary={dailySummary}
-              selectedDate={selectedDate}
-              onSelectDate={setSelectedDate}
-              onInspectJob={handleInspectJob}
-            />
-          </div>
+          <HomeDashboard
+            status={cncStatus}
+            dailySummary={dailySummary}
+            selectedDate={selectedDate}
+            onSelectDate={setSelectedDate}
+            lastUpdated={lastUpdated}
+            onInspectJob={handleInspectJob}
+            onNavigateToFiles={() => setActiveTab('files')}
+          />
         )}
 
-        {/* Tab 2: Work Orders (Lazy-loaded with server-side pagination) */}
+        {/* Tab 2: Dedicated CNC Programs & Files Grid */}
+        {activeTab === 'files' && (
+          <CncFilesView
+            initialJobId={inspectedJobId || undefined}
+          />
+        )}
+
+        {/* Tab 3: Work Orders (Lazy-loaded with server-side pagination) */}
         {activeTab === 'orders' && (
           <WorkOrdersTable
             onSelectWo={handleSelectWo}
           />
         )}
 
-        {/* Tab 3: Piece Traceability (Lazy-loaded on demand) */}
+        {/* Tab 4: Piece Traceability (Lazy-loaded on demand) */}
         {activeTab === 'traceability' && (
           <TraceabilityView
             initialWo={traceabilityWo}
           />
         )}
 
-        {/* Tab 4: CNC File Inspector (Lazy-loaded with pagination) */}
+        {/* Tab 5: Raw CNC File Inspector (Lazy-loaded with pagination) */}
         {activeTab === 'inspector' && (
           <CncFileInspector
             selectedJobId={inspectedJobId || undefined}
           />
         )}
 
-        {/* Tab 5: Automated Verification Testbench */}
+        {/* Tab 6: Automated Verification Testbench */}
         {activeTab === 'tests' && (
           <VerificationTestBench />
         )}
@@ -146,7 +140,7 @@ export default function App() {
       <footer className="border-t border-slate-900 bg-slate-950/80 py-4 text-center text-xs font-mono text-slate-500">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
           <span>CNC Production Monitoring &bull; PostgreSQL Event Engine &bull; Continuous Share Poller</span>
-          <span>Background Service Active &bull; No Manual Sync Required</span>
+          <span>Background Service Active &bull; Canonical Unit: m²-mm</span>
         </div>
       </footer>
     </div>

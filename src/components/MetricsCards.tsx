@@ -1,5 +1,5 @@
 import React from 'react';
-import { Layers, Box, Maximize2, Cpu } from 'lucide-react';
+import { Layers, Box, Maximize2, Cpu, Scale } from 'lucide-react';
 import { DailyProductionSummary } from '../types';
 
 interface MetricsCardsProps {
@@ -12,9 +12,10 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({ summary, selectedDat
   const pieces = summary?.totalPiecesCut ?? 0;
   const area = summary?.totalAreaSqm ?? 0;
   const jobs = summary?.activeJobsCount ?? 0;
+  const sqmMm = summary?.totalProductionSqmMm ?? 0;
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
       {/* Mother Sheets Cut */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-sm">
         <div className="flex items-center justify-between">
@@ -58,11 +59,31 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({ summary, selectedDat
           </div>
         </div>
         <div className="mt-3 flex items-baseline space-x-2">
-          <span className="text-3xl font-bold font-mono text-slate-50 tracking-tight">{area.toFixed(4)}</span>
+          <span className="text-3xl font-bold font-mono text-slate-50 tracking-tight">{area.toFixed(3)}</span>
           <span className="text-xs text-slate-400 font-mono">m²</span>
         </div>
         <p className="mt-2 text-xs text-slate-400">
           Σ (DimX/1000 × DimY/1000) for completed sheets
+        </p>
+      </div>
+
+      {/* Canonical Production Volume m²-mm */}
+      <div className="bg-slate-900/90 border border-indigo-500/30 rounded-xl p-5 shadow-sm relative overflow-hidden">
+        <div className="absolute -right-4 -bottom-4 w-16 h-16 bg-indigo-500/5 rounded-full blur-xl pointer-events-none" />
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium text-indigo-300 tracking-wide uppercase">Production Volume</span>
+          <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+            <Scale className="w-4 h-4" />
+          </div>
+        </div>
+        <div className="mt-3 flex items-baseline space-x-2">
+          <span className="text-3xl font-bold font-mono text-indigo-200 tracking-tight">
+            {sqmMm.toFixed(3)}
+          </span>
+          <span className="text-xs text-indigo-400 font-mono font-semibold">m²-mm</span>
+        </div>
+        <p className="mt-2 text-xs text-slate-400">
+          Canonical (Area × Thickness) for {selectedDate}
         </p>
       </div>
 

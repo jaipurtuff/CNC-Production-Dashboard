@@ -5,6 +5,7 @@ export interface DailyProductionSummary {
   totalMotherSheetsCut: number;
   totalPiecesCut: number;
   totalAreaSqm: number;
+  totalProductionSqmMm: number;
   activeJobsCount: number;
   jobBreakdown: {
     jobId: string;
@@ -15,6 +16,7 @@ export interface DailyProductionSummary {
     sheetsCutToday: number;
     piecesCutToday: number;
     areaSqmToday: number;
+    productionSqmMmToday: number;
     totalProgrammedSheets: number;
     lifetimeCompletedSheets: number;
   }[];
@@ -24,6 +26,7 @@ export interface DailyProductionSummary {
     sheetIndex: number;
     piecesCount: number;
     areaSqm: number;
+    productionSqmMm: number;
     eventTimestamp: string;
     confidence: string;
     fbtLastWrite: string | null;
@@ -37,17 +40,19 @@ export async function getDailyProduction(
 ): Promise<DailyProductionSummary> {
   const targetDate = dateStr || new Date().toISOString().split('T')[0];
 
-  // 1. Mother Sheets Cut, Pieces Cut, Area (Server-side PostgreSQL aggregation)
+  // 1. Mother Sheets Cut, Pieces Cut, Area, Production m²-mm (Server-side PostgreSQL aggregation)
   const summaryRes = await db.query<{
     sheets_count: string;
     pieces_count: string;
     total_area: string;
+    total_sqm_mm: string;
     distinct_jobs: string;
   }>(
     `SELECT
        COUNT(DISTINCT CONCAT(job_id, '-', sheet_index)) as sheets_count,
        COALESCE(SUM(pieces_count), 0) as pieces_count,
        COALESCE(SUM(area_sqm), 0) as total_area,
+       COALESCE(SUM(production_sqm_mm), 0) as total_sqm_mm,
        COUNT(DISTINCT job_id) as distinct_jobs
      FROM production_events
      WHERE production_date = $1 AND event_type = 'SHEET_COMPLETED'`,
@@ -58,6 +63,7 @@ export async function getDailyProduction(
   const totalMotherSheetsCut = parseInt(row?.sheets_count || '0', 10);
   const totalPiecesCut = parseInt(row?.pieces_count || '0', 10);
   const totalAreaSqm = parseFloat(parseFloat(row?.total_area || '0').toFixed(4));
+  const totalProductionSqmMm = parseFloat(parseFloat(row?.total_sqm_mm || '0').toFixed(4));
   const activeJobsCount = parseInt(row?.distinct_jobs || '0', 10);
 
   // 2. Breakdown by Job (Single query including lifetime completed sheets, no N+1 query)
@@ -69,6 +75,7 @@ export async function getDailyProduction(
     sheets_today: string;
     pieces_today: string;
     area_today: string;
+    sqm_mm_today: string;
     total_programmed_sheets: number;
     lifetime_completed_sheets: string;
   }>(
@@ -81,6 +88,7 @@ export async function getDailyProduction(
        COUNT(pe.sheet_index) as sheets_today,
        COALESCE(SUM(pe.pieces_count), 0) as pieces_today,
        COALESCE(SUM(pe.area_sqm), 0) as area_today,
+       COALESCE(SUM(pe.production_sqm_mm), 0) as sqm_mm_today,
        COALESCE(life.lifetime_count, 0) as lifetime_completed_sheets
      FROM production_events pe
      JOIN cnc_jobs j ON pe.job_id = j.job_id
@@ -109,6 +117,7 @@ export async function getDailyProduction(
       sheetsCutToday: parseInt(r.sheets_today, 10),
       piecesCutToday: parseInt(r.pieces_today, 10),
       areaSqmToday: parseFloat(parseFloat(r.area_today).toFixed(4)),
+      productionSqmMmToday: parseFloat(parseFloat(r.sqm_mm_today || '0').toFixed(4)),
       totalProgrammedSheets: r.total_programmed_sheets,
       lifetimeCompletedSheets: parseInt(r.lifetime_completed_sheets || '0', 10),
     };
@@ -121,12 +130,13 @@ export async function getDailyProduction(
     sheet_index: number;
     pieces_count: number;
     area_sqm: string;
+    production_sqm_mm: string;
     event_timestamp: string;
     confidence: string;
     fbt_last_write: string | null;
   }>(
     `SELECT
-       event_id, job_id, sheet_index, pieces_count, area_sqm,
+       event_id, job_id, sheet_index, pieces_count, area_sqm, production_sqm_mm,
        event_timestamp, confidence, fbt_last_write
      FROM production_events
      WHERE production_date = $1 AND event_type = 'SHEET_COMPLETED'
@@ -141,6 +151,7 @@ export async function getDailyProduction(
     sheetIndex: e.sheet_index,
     piecesCount: e.pieces_count,
     areaSqm: parseFloat(parseFloat(e.area_sqm).toFixed(4)),
+    productionSqmMm: parseFloat(parseFloat(e.production_sqm_mm || '0').toFixed(4)),
     eventTimestamp: e.event_timestamp,
     confidence: e.confidence,
     fbtLastWrite: e.fbt_last_write,
@@ -151,6 +162,7 @@ export async function getDailyProduction(
     totalMotherSheetsCut,
     totalPiecesCut,
     totalAreaSqm,
+    totalProductionSqmMm,
     activeJobsCount,
     jobBreakdown,
     events,
@@ -165,11 +177,12 @@ export async function getJobTimeline(db: IDbClient, jobId: string) {
     production_date: string;
     pieces_count: number;
     area_sqm: string;
+    production_sqm_mm: string;
     fbt_last_write: string | null;
   }>(
     `SELECT
        event_id, sheet_index, event_timestamp, production_date,
-       pieces_count, area_sqm, fbt_last_write
+       pieces_count, area_sqm, production_sqm_mm, fbt_last_write
      FROM production_events
      WHERE job_id = $1 AND event_type = 'SHEET_COMPLETED'
      ORDER BY sheet_index ASC, event_timestamp ASC`,
@@ -183,6 +196,7 @@ export async function getJobTimeline(db: IDbClient, jobId: string) {
     productionDate: r.production_date,
     piecesCount: r.pieces_count,
     areaSqm: parseFloat(parseFloat(r.area_sqm).toFixed(4)),
+    productionSqmMm: parseFloat(parseFloat(r.production_sqm_mm || '0').toFixed(4)),
     fbtLastWrite: r.fbt_last_write,
   }));
 }

@@ -1,9 +1,12 @@
 import fs from 'fs';
 import path from 'path';
+import { EventEmitter } from 'events';
 import { IDbClient } from '../db/index.js';
 import { DiscoveredFile, computeSha256, groupCncFiles, correlateJobFiles } from '../parsers/jobCorrelator.js';
 import { CorrelatedCncJob } from '../parsers/types.js';
 import { processJobStateTransition } from '../engine/stateComparator.js';
+
+export const cncEventEmitter = new EventEmitter();
 
 interface FileTrackingCache {
   size: number;
@@ -75,19 +78,72 @@ export class CncMonitorService {
   private isCacheInitialized: boolean = false;
   private cachedCorrelatedJobs = new Map<string, CorrelatedCncJob>();
   private knownJobsInDb = new Set<string>();
+  private stabilityDelayMs: number;
+  private retryCount: number;
+  private retryDelayMs: number;
 
   constructor(
     db: IDbClient,
     sharePath: string = process.env.CNC_SHARE_PATH || '\\\\192.168.11.211\\iso',
-    scanIntervalMs: number = parseInt(process.env.CNC_SCAN_INTERVAL_MS || '5000', 10),
-    offlineGraceSec: number = parseInt(process.env.CNC_OFFLINE_GRACE_SEC || '30', 10)
+    scanIntervalMs: number = parseInt(process.env.CNC_SCAN_INTERVAL_MS || '1500', 10),
+    offlineGraceSec: number = parseInt(process.env.CNC_OFFLINE_GRACE_SEC || '30', 10),
+    stabilityDelayMs: number = parseInt(process.env.FILE_STABILITY_DELAY_MS || '150', 10),
+    retryCount: number = parseInt(process.env.FILE_READ_RETRY_COUNT || '3', 10),
+    retryDelayMs: number = parseInt(process.env.FILE_READ_RETRY_DELAY_MS || '100', 10)
   ) {
     this.db = db;
     this.sharePath = normalizeSharePath(sharePath);
     this.scanIntervalMs = scanIntervalMs;
     this.offlineGraceSec = offlineGraceSec;
+    this.stabilityDelayMs = stabilityDelayMs;
+    this.retryCount = retryCount;
+    this.retryDelayMs = retryDelayMs;
 
     // READ-ONLY MANDATE: Under NO circumstances should this service create or write files to the CNC network share
+  }
+
+  /**
+   * Section 8: File Stability Check
+   * When a change is detected:
+   * 1. Read metadata
+   * 2. Wait short configurable period (e.g. 150ms)
+   * 3. Read metadata again
+   * 4. Confirm size and modification timestamp are stable
+   * 5. Attempt read with retries
+   */
+  private async readFileWithStability(
+    filePath: string,
+    initialStat: fs.Stats
+  ): Promise<{ content: Buffer; sha256: string } | null> {
+    if (this.stabilityDelayMs > 0) {
+      await new Promise(r => setTimeout(r, this.stabilityDelayMs));
+      try {
+        const secondStat = fs.statSync(filePath);
+        if (
+          secondStat.size !== initialStat.size ||
+          Math.abs(secondStat.mtimeMs - initialStat.mtimeMs) > 100
+        ) {
+          // File is still being actively written by CNC/Optima software
+          return null;
+        }
+      } catch {
+        return null;
+      }
+    }
+
+    // Read with retry (Section 8: up to configurable retries, e.g. 3 retries, 100ms apart)
+    for (let attempt = 0; attempt <= this.retryCount; attempt++) {
+      try {
+        const content = fs.readFileSync(filePath);
+        const sha256 = computeSha256(content);
+        return { content, sha256 };
+      } catch (readErr) {
+        if (attempt < this.retryCount) {
+          await new Promise(r => setTimeout(r, this.retryDelayMs));
+        }
+      }
+    }
+    return null;
   }
 
   private normalizeSharePath(rawPath: string): string {
@@ -536,31 +592,62 @@ export class CncMonitorService {
         }
       }
 
-      // Update state singleton with active job details and total jobs tracked
+      // Determine collector state (Section 17 & 18):
+      // LIVE: Collector recently scanned and CNC activity is current.
+      // STALE: Share reachable, but no recent meaningful activity (machine idle / paused).
+      // OFFLINE: CNC share unreachable beyond configured grace period.
+      // ERROR: Collector encountered an error, but process remains alive.
+      let collectorState = 'STALE';
+      if (!shouldBeOnline) {
+        collectorState = 'OFFLINE';
+      } else if (reachabilityError) {
+        collectorState = 'ERROR';
+      } else if (activeJobId) {
+        collectorState = 'LIVE';
+      } else {
+        collectorState = 'STALE';
+      }
+
+      // Update state singleton with active job details, collector state, and total jobs tracked
       await this.db.query(
         `UPDATE cnc_monitor_state
          SET active_job_id = $1,
              current_sheet_index = $2,
              total_jobs_tracked = $3,
+             collector_state = $4,
              error_message = NULL
          WHERE id = 1`,
-        [activeJobId, currentSheetIdx, this.knownJobsInDb.size]
+        [activeJobId, currentSheetIdx, this.knownJobsInDb.size, collectorState]
       );
+
+      cncEventEmitter.emit('scan_complete', {
+        timestamp: new Date(now).toISOString(),
+        isOnline: shouldBeOnline,
+        collectorState,
+        activeJobId,
+        currentSheetIdx,
+        changedFilesCount,
+        jobsUpdatedCount,
+      });
 
       const elapsedMs = Date.now() - now;
       if (changedFilesCount > 0 || jobsUpdatedCount > 0) {
         console.log(
-          `[CNC Monitor] Scan completed in ${elapsedMs}ms: ${discovered.length} total files, ${changedFilesCount} changed files, ${jobsUpdatedCount} jobs updated`
+          `[CNC Monitor] Scan completed in ${elapsedMs}ms: ${discovered.length} total files, ${changedFilesCount} changed files, ${jobsUpdatedCount} jobs updated [${collectorState}]`
         );
       }
     } catch (err: any) {
       console.error('[CNC Monitor] Scan cycle failed:', err);
       await this.db.query(
         `UPDATE cnc_monitor_state
-         SET error_message = $1
+         SET error_message = $1,
+             collector_state = 'ERROR'
          WHERE id = 1`,
         [err?.message || String(err)]
       );
+      cncEventEmitter.emit('scan_error', {
+        error: err?.message || String(err),
+      });
     } finally {
       this.isScanning = false;
     }

@@ -129,6 +129,16 @@ export const ActiveJobBanner: React.FC<ActiveJobBannerProps> = ({ status, onSele
               </span>
             </div>
 
+            {activeJob.productionSqmMmCut !== undefined && (
+              <div className="px-3 py-1.5 rounded-lg bg-slate-950/70 border border-indigo-500/30 text-center min-w-[95px]">
+                <span className="block text-[10px] uppercase text-indigo-300 font-mono">Cut Volume</span>
+                <span className="text-sm font-bold font-mono text-indigo-200">
+                  {activeJob.productionSqmMmCut.toFixed(3)}
+                </span>
+                <span className="block text-[9px] font-mono text-indigo-400">m²-mm</span>
+              </div>
+            )}
+
             <div className="px-3 py-1.5 rounded-lg bg-slate-950/70 border border-slate-800 text-center min-w-[80px]">
               <span className="block text-[10px] uppercase text-slate-500 font-mono">Progress</span>
               <span className="text-sm font-bold font-mono text-indigo-400">

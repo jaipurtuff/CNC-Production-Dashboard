@@ -61,7 +61,7 @@ export const VerificationTestBench: React.FC = () => {
           className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-xs font-mono font-medium flex items-center space-x-2 transition-colors"
         >
           {running ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-          <span>{running ? 'Running 8 Verification Tests...' : 'Run Diagnostics & Tests'}</span>
+          <span>{running ? 'Running 14 Verification Tests...' : 'Run Diagnostics & Tests'}</span>
         </button>
       </div>
 

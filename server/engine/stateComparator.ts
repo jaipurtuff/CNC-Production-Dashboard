@@ -1,5 +1,6 @@
 import { IDbClient } from '../db/index.js';
 import { CorrelatedCncJob, FbtSheetRecord } from '../parsers/types.js';
+import { calculateSqmMm, calculateSqmMmFromArea } from './productionUnits.js';
 
 export interface TransitionResult {
   jobId: string;
@@ -13,6 +14,8 @@ export interface TransitionResult {
   totalCutSheets: number;
   totalPendingSheets: number;
   currentLayoutIndex: number | null;
+  totalPlannedSqmMm: number;
+  totalCutSqmMm: number;
 }
 
 export async function processJobStateTransition(
@@ -61,6 +64,23 @@ export async function processJobStateTransition(
   );
   const isNowComplete = totalPlannedSheets > 0 && totalCutSheets >= totalPlannedSheets;
 
+  const totalPlannedSqmMm = job.sheets.reduce((sum, s) => {
+    const qta = s.quantityProgrammed ?? 1;
+    const w = s.dimX || job.sheetWidthMm || 0;
+    const h = s.dimY || job.sheetHeightMm || 0;
+    const t = s.thickness || job.sheetThicknessMm || 0;
+    return sum + qta * calculateSqmMm(w, h, t);
+  }, 0);
+
+  const totalCutSqmMm = job.sheets.reduce((sum, s) => {
+    const qta = s.quantityProgrammed ?? 1;
+    const cnt = s.quantityCut ?? (s.isCompleted ? qta : 0);
+    const w = s.dimX || job.sheetWidthMm || 0;
+    const h = s.dimY || job.sheetHeightMm || 0;
+    const t = s.thickness || job.sheetThicknessMm || 0;
+    return sum + cnt * calculateSqmMm(w, h, t);
+  }, 0);
+
   // Determine current active layout:
   // "The logical next incomplete layout is the first layout where Cnt < Qta"
   const nextIncompleteLayout = job.sheets.find(s => {
@@ -91,9 +111,9 @@ export async function processJobStateTransition(
       `INSERT INTO cnc_jobs (
         job_id, base_filename, total_programmed_sheets, total_layouts, total_planned_sheets,
         total_cut_sheets, total_pending_sheets, current_layout_index, sheet_width_mm, sheet_height_mm,
-        sheet_thickness_mm, material_code, customer_name, order_no, planned_waste_pct,
+        sheet_thickness_mm, total_planned_sqm_mm, total_cut_sqm_mm, material_code, customer_name, order_no, planned_waste_pct,
         filename_date, otd_date, fbt_last_write, fbt_file_mtime, first_detected_at, last_seen_at, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $20, $21)`,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $22, $23)`,
       [
         job.jobId,
         job.baseFilename,
@@ -106,6 +126,8 @@ export async function processJobStateTransition(
         job.sheetWidthMm,
         job.sheetHeightMm,
         job.sheetThicknessMm,
+        totalPlannedSqmMm,
+        totalCutSqmMm,
         job.materialCode,
         resolvedCustomerName || null,
         job.orderNo || null,
@@ -289,6 +311,7 @@ export async function processJobStateTransition(
 
     const startOffset = layoutStartOffsets.get(layoutIdx) ?? 0;
     const areaSqm = (sheet.dimX / 1000) * (sheet.dimY / 1000);
+    const prodSqmMm = calculateSqmMm(sheet.dimX, sheet.dimY, sheet.thickness);
 
     // If Cnt increased (newly_completed > 0): create events for each newly completed cut copy
     if (newlyCompleted > 0) {
@@ -314,9 +337,10 @@ export async function processJobStateTransition(
           const insertEventRes = await db.query(
             `INSERT INTO production_events (
               job_id, sheet_index, event_type, event_timestamp, production_date,
-              pieces_count, area_sqm, fbt_raw_line, fbt_last_write, confidence,
+              pieces_count, area_sqm, production_sqm_mm, width_mm, height_mm, thickness_mm,
+              material, fbt_raw_line, fbt_last_write, confidence,
               layout_index, layout_cut_index, created_at
-            ) VALUES ($1, $2, 'SHEET_COMPLETED', $3, $4, $5, $6, $7, $8, 'INFERRED', $9, $10, $11)
+            ) VALUES ($1, $2, 'SHEET_COMPLETED', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'INFERRED', $14, $15, $16)
             ON CONFLICT (job_id, sheet_index, event_type) DO NOTHING
             RETURNING event_id`,
             [
@@ -326,6 +350,11 @@ export async function processJobStateTransition(
               effectiveDateStr,
               piecesForSheet,
               areaSqm,
+              prodSqmMm,
+              sheet.dimX,
+              sheet.dimY,
+              sheet.thickness,
+              sheet.materialCode || job.materialCode || null,
               sheet.rawLine,
               job.fbtLastWrite || null,
               layoutIdx,
@@ -349,8 +378,8 @@ export async function processJobStateTransition(
     await db.query(
       `INSERT INTO cnc_layouts (
         job_id, layout_index, layout_code, dim_x, dim_y, thickness_mm, area_sqm,
-        qta, cnt, raw_line, status, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        production_sqm_mm, qta, cnt, raw_line, status, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (job_id, layout_index) DO UPDATE
       SET qta = EXCLUDED.qta,
           cnt = EXCLUDED.cnt,
@@ -358,6 +387,7 @@ export async function processJobStateTransition(
           dim_y = EXCLUDED.dim_y,
           thickness_mm = EXCLUDED.thickness_mm,
           area_sqm = EXCLUDED.area_sqm,
+          production_sqm_mm = EXCLUDED.production_sqm_mm,
           raw_line = EXCLUDED.raw_line,
           status = EXCLUDED.status,
           updated_at = EXCLUDED.updated_at`,
@@ -369,6 +399,7 @@ export async function processJobStateTransition(
         sheet.dimY,
         sheet.thickness,
         areaSqm,
+        prodSqmMm,
         newQta,
         newCnt,
         sheet.rawLine,
@@ -381,11 +412,12 @@ export async function processJobStateTransition(
     await db.query(
       `INSERT INTO cnc_mother_sheets (
         job_id, sheet_index, layout_index, sheet_code, width_mm, height_mm, thickness_mm,
-        area_sqm, programmed_pieces, qta, cnt, fbt_record_raw, status, is_completed, completed_at
-      ) VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        area_sqm, production_sqm_mm, programmed_pieces, qta, cnt, fbt_record_raw, status, is_completed, completed_at
+      ) VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       ON CONFLICT (job_id, sheet_index) DO UPDATE
       SET qta = EXCLUDED.qta,
           cnt = EXCLUDED.cnt,
+          production_sqm_mm = EXCLUDED.production_sqm_mm,
           status = EXCLUDED.status,
           is_completed = EXCLUDED.is_completed,
           fbt_record_raw = EXCLUDED.fbt_record_raw,
@@ -398,6 +430,7 @@ export async function processJobStateTransition(
         sheet.dimY,
         sheet.thickness,
         areaSqm,
+        prodSqmMm,
         newQta,
         newQta,
         newCnt,
@@ -427,7 +460,8 @@ export async function processJobStateTransition(
     // Update active job in monitor state with the current active layout
     await db.query(
       `UPDATE cnc_monitor_state
-       SET active_job_id = $1, current_sheet_index = $2, last_scan_at = $3
+       SET active_job_id = $1, current_sheet_index = $2, last_scan_at = $3,
+           last_production_event_at = $3, last_state_change_at = $3
        WHERE id = 1`,
       [job.jobId, currentLayoutIndex, scanTime.toISOString()]
     );
@@ -444,17 +478,21 @@ export async function processJobStateTransition(
          total_cut_sheets = $3,
          total_pending_sheets = $4,
          current_layout_index = $5,
-         last_seen_at = $6,
-         status = $7,
-         fbt_last_write = COALESCE($8, fbt_last_write),
-         fbt_file_mtime = COALESCE($10, fbt_file_mtime)
-     WHERE job_id = $9`,
+         total_planned_sqm_mm = $6,
+         total_cut_sqm_mm = $7,
+         last_seen_at = $8,
+         status = $9,
+         fbt_last_write = COALESCE($10, fbt_last_write),
+         fbt_file_mtime = COALESCE($12, fbt_file_mtime)
+     WHERE job_id = $11`,
     [
       totalPlannedSheets,
       totalLayouts,
       totalCutSheets,
       totalPendingSheets,
       currentLayoutIndex,
+      totalPlannedSqmMm,
+      totalCutSqmMm,
       scanTime.toISOString(),
       isNowComplete ? 'COMPLETED' : 'ACTIVE',
       job.fbtLastWrite || null,
@@ -475,5 +513,7 @@ export async function processJobStateTransition(
     totalCutSheets,
     totalPendingSheets,
     currentLayoutIndex,
+    totalPlannedSqmMm,
+    totalCutSqmMm,
   };
 }

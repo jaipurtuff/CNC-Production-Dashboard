@@ -32,6 +32,7 @@ export async function runDatabaseMigrations(db: IDbClient): Promise<void> {
     `ALTER TABLE cnc_mother_sheets ADD COLUMN IF NOT EXISTS qta INTEGER NOT NULL DEFAULT 1;`,
     `ALTER TABLE cnc_mother_sheets ADD COLUMN IF NOT EXISTS cnt INTEGER NOT NULL DEFAULT 0;`,
     `ALTER TABLE cnc_mother_sheets ADD COLUMN IF NOT EXISTS is_completed BOOLEAN NOT NULL DEFAULT FALSE;`,
+    `ALTER TABLE cnc_mother_sheets ADD COLUMN IF NOT EXISTS production_sqm_mm NUMERIC(14,4) NOT NULL DEFAULT 0;`,
 
     // cnc_layouts updates
     `ALTER TABLE cnc_layouts ADD COLUMN IF NOT EXISTS qta INTEGER NOT NULL DEFAULT 1;`,
@@ -39,6 +40,7 @@ export async function runDatabaseMigrations(db: IDbClient): Promise<void> {
     `ALTER TABLE cnc_layouts ADD COLUMN IF NOT EXISTS raw_line TEXT;`,
     `ALTER TABLE cnc_layouts ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING';`,
     `ALTER TABLE cnc_layouts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;`,
+    `ALTER TABLE cnc_layouts ADD COLUMN IF NOT EXISTS production_sqm_mm NUMERIC(14,4) NOT NULL DEFAULT 0;`,
 
     // cnc_jobs updates
     `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS file_base_name TEXT;`,
@@ -55,6 +57,8 @@ export async function runDatabaseMigrations(db: IDbClient): Promise<void> {
     `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS total_cut_sheets INTEGER NOT NULL DEFAULT 0;`,
     `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS total_pending_sheets INTEGER NOT NULL DEFAULT 0;`,
     `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS current_layout_index INTEGER;`,
+    `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS total_planned_sqm_mm NUMERIC(14,4) NOT NULL DEFAULT 0;`,
+    `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS total_cut_sqm_mm NUMERIC(14,4) NOT NULL DEFAULT 0;`,
     `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS fbt_last_write TEXT;`,
     `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS fbt_file_mtime TIMESTAMPTZ;`,
     `ALTER TABLE cnc_jobs ADD COLUMN IF NOT EXISTS first_scanned_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;`,
@@ -70,6 +74,7 @@ export async function runDatabaseMigrations(db: IDbClient): Promise<void> {
     `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS material TEXT;`,
     `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS cut_time TIMESTAMPTZ;`,
     `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS event_date DATE;`,
+    `ALTER TABLE production_events ADD COLUMN IF NOT EXISTS production_sqm_mm NUMERIC(14,4) NOT NULL DEFAULT 0;`,
 
     // cnc_pieces updates
     `ALTER TABLE cnc_pieces ADD COLUMN IF NOT EXISTS wo_no TEXT;`,
@@ -83,6 +88,9 @@ export async function runDatabaseMigrations(db: IDbClient): Promise<void> {
 
     // cnc_monitor_state updates
     `ALTER TABLE cnc_monitor_state ADD COLUMN IF NOT EXISTS error_message TEXT;`,
+    `ALTER TABLE cnc_monitor_state ADD COLUMN IF NOT EXISTS collector_state TEXT NOT NULL DEFAULT 'LIVE';`,
+    `ALTER TABLE cnc_monitor_state ADD COLUMN IF NOT EXISTS last_production_event_at TIMESTAMPTZ;`,
+    `ALTER TABLE cnc_monitor_state ADD COLUMN IF NOT EXISTS last_state_change_at TIMESTAMPTZ;`,
   ];
 
   for (const sql of columnUpdates) {
@@ -113,6 +121,13 @@ export async function runDatabaseMigrations(db: IDbClient): Promise<void> {
     `UPDATE cnc_jobs SET total_planned_sheets = total_programmed_sheets WHERE (total_planned_sheets IS NULL OR total_planned_sheets = 0) AND total_programmed_sheets > 0;`,
     `UPDATE cnc_jobs SET total_cut_sheets = 0 WHERE total_cut_sheets IS NULL;`,
     `UPDATE cnc_jobs SET total_pending_sheets = GREATEST(0, total_planned_sheets - total_cut_sheets) WHERE total_pending_sheets IS NULL;`,
+
+    // production_sqm_mm backfills (canonical: (width/1000)*(height/1000)*thickness)
+    `UPDATE cnc_mother_sheets SET production_sqm_mm = (area_sqm * thickness_mm)::numeric(14,4) WHERE (production_sqm_mm IS NULL OR production_sqm_mm = 0) AND area_sqm > 0 AND thickness_mm > 0;`,
+    `UPDATE cnc_layouts SET production_sqm_mm = (area_sqm * thickness_mm)::numeric(14,4) WHERE (production_sqm_mm IS NULL OR production_sqm_mm = 0) AND area_sqm > 0 AND thickness_mm > 0;`,
+    `UPDATE production_events SET production_sqm_mm = (area_sqm * COALESCE(thickness_mm, 5.0))::numeric(14,4) WHERE (production_sqm_mm IS NULL OR production_sqm_mm = 0) AND area_sqm > 0;`,
+    `UPDATE cnc_jobs SET total_planned_sqm_mm = (total_planned_sheets * (sheet_width_mm/1000.0) * (sheet_height_mm/1000.0) * sheet_thickness_mm)::numeric(14,4) WHERE (total_planned_sqm_mm IS NULL OR total_planned_sqm_mm = 0) AND sheet_width_mm > 0 AND sheet_height_mm > 0;`,
+    `UPDATE cnc_jobs SET total_cut_sqm_mm = (total_cut_sheets * (sheet_width_mm/1000.0) * (sheet_height_mm/1000.0) * sheet_thickness_mm)::numeric(14,4) WHERE (total_cut_sqm_mm IS NULL OR total_cut_sqm_mm = 0) AND sheet_width_mm > 0 AND sheet_height_mm > 0;`,
   ];
 
   for (const sql of backfillQueries) {
